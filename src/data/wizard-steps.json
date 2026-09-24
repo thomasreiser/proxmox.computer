@@ -1,0 +1,7 @@
+[
+  { "id": "hardware", "label": "hardware" },
+  { "id": "network", "label": "network" },
+  { "id": "storage", "label": "storage" },
+  { "id": "backups", "label": "backups" },
+  { "id": "install-software", "label": "install software" }
+]

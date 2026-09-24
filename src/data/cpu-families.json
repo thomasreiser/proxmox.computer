@@ -1,0 +1,1521 @@
+{
+  "architectures": {
+    "intel": [
+      {
+        "name": "Conroe",
+        "qemuType": "Conroe",
+        "from": 2006,
+        "to": 2007,
+        "defaultCores": 2
+      },
+      {
+        "name": "Penryn",
+        "qemuType": "Penryn",
+        "from": 2007,
+        "to": 2008,
+        "defaultCores": 2
+      },
+      {
+        "name": "Nehalem",
+        "qemuType": "Nehalem-IBRS",
+        "from": 2008,
+        "to": 2010,
+        "defaultCores": 4
+      },
+      {
+        "name": "Westmere",
+        "qemuType": "Westmere-IBRS",
+        "from": 2010,
+        "to": 2011,
+        "defaultCores": 6
+      },
+      {
+        "name": "SandyBridge",
+        "qemuType": "SandyBridge-IBRS",
+        "from": 2011,
+        "to": 2012,
+        "defaultCores": 4
+      },
+      {
+        "name": "IvyBridge",
+        "qemuType": "IvyBridge-IBRS",
+        "from": 2012,
+        "to": 2013,
+        "defaultCores": 4
+      },
+      {
+        "name": "Haswell",
+        "qemuType": "Haswell-noTSX-IBRS",
+        "from": 2013,
+        "to": 2015,
+        "defaultCores": 4
+      },
+      {
+        "name": "Broadwell",
+        "qemuType": "Broadwell-noTSX-IBRS",
+        "from": 2014,
+        "to": 2016,
+        "defaultCores": 4
+      },
+      {
+        "name": "Skylake-Client",
+        "qemuType": "Skylake-Client-noTSX-IBRS",
+        "from": 2015,
+        "to": 2017,
+        "defaultCores": 4
+      },
+      {
+        "name": "Skylake-Server",
+        "qemuType": "Skylake-Server-noTSX-IBRS",
+        "from": 2017,
+        "to": 2019,
+        "defaultCores": 16
+      },
+      {
+        "name": "KnightsMill",
+        "qemuType": "KnightsMill",
+        "from": 2017,
+        "to": 2018,
+        "defaultCores": 64
+      },
+      {
+        "name": "Cascadelake-Server",
+        "qemuType": "Cascadelake-Server-noTSX",
+        "from": 2019,
+        "to": 2020,
+        "defaultCores": 16
+      },
+      {
+        "name": "Comet Lake",
+        "qemuType": "Skylake-Client-noTSX-IBRS",
+        "from": 2019,
+        "to": 2020,
+        "defaultCores": 6,
+        "note": "14nm desktop/mobile refresh of the skylake core; no avx-512"
+      },
+      {
+        "name": "Icelake-Client",
+        "qemuType": "Icelake-Client-noTSX",
+        "from": 2019,
+        "to": 2020,
+        "defaultCores": 4
+      },
+      {
+        "name": "Cooperlake",
+        "qemuType": "Cooperlake",
+        "from": 2020,
+        "to": 2021,
+        "defaultCores": 28
+      },
+      {
+        "name": "Rocket Lake",
+        "qemuType": "Icelake-Client-noTSX",
+        "from": 2021,
+        "to": 2021,
+        "defaultCores": 8,
+        "note": "10nm sunny cove core backported to 14nm \u2014 a rare desktop chip that actually has avx-512"
+      },
+      {
+        "name": "Icelake-Server",
+        "qemuType": "Icelake-Server-noTSX",
+        "from": 2021,
+        "to": 2023,
+        "defaultCores": 32
+      },
+      {
+        "name": "Alder Lake",
+        "qemuType": "Skylake-Client-noTSX-IBRS",
+        "from": 2021,
+        "to": 2022,
+        "defaultCores": 16,
+        "note": "hybrid p-core/e-core design; the e-cores top out at avx2, so the chip has no avx-512"
+      },
+      {
+        "name": "Raptor Lake",
+        "qemuType": "Skylake-Client-noTSX-IBRS",
+        "from": 2022,
+        "to": 2024,
+        "defaultCores": 24,
+        "note": "hybrid p-core/e-core design; the e-cores top out at avx2, so the chip has no avx-512"
+      },
+      {
+        "name": "SapphireRapids",
+        "qemuType": "SapphireRapids",
+        "from": 2023,
+        "to": 2024,
+        "defaultCores": 32
+      },
+      {
+        "name": "Meteor Lake",
+        "qemuType": "Skylake-Client-noTSX-IBRS",
+        "from": 2023,
+        "to": 2024,
+        "defaultCores": 16,
+        "note": "core ultra 100 mobile, hybrid p-core/e-core design; the e-cores top out at avx2, so the chip has no avx-512"
+      },
+      {
+        "name": "SierraForest",
+        "qemuType": "SierraForest",
+        "from": 2024,
+        "to": 2025,
+        "defaultCores": 64
+      },
+      {
+        "name": "GraniteRapids",
+        "qemuType": "GraniteRapids",
+        "from": 2024,
+        "to": 2025,
+        "defaultCores": 40
+      },
+      {
+        "name": "Lunar Lake",
+        "qemuType": "Skylake-Client-noTSX-IBRS",
+        "from": 2024,
+        "to": 2025,
+        "defaultCores": 8,
+        "note": "core ultra 200v mobile, hybrid p-core/e-core design; the e-cores top out at avx2, so the chip has no avx-512"
+      },
+      {
+        "name": "Arrow Lake",
+        "qemuType": "Skylake-Client-noTSX-IBRS",
+        "from": 2024,
+        "to": 2025,
+        "defaultCores": 24,
+        "note": "core ultra 200s desktop, hybrid p-core/e-core design; the e-cores top out at avx2, so the chip has no avx-512"
+      },
+      {
+        "name": "ClearwaterForest",
+        "qemuType": "ClearwaterForest",
+        "from": 2025,
+        "to": null,
+        "defaultCores": 64
+      }
+    ],
+    "amd": [
+      {
+        "name": "athlon",
+        "qemuType": "athlon",
+        "from": 1999,
+        "to": 2003,
+        "defaultCores": 1
+      },
+      {
+        "name": "Opteron_G1",
+        "qemuType": "Opteron_G1",
+        "from": 2003,
+        "to": 2005,
+        "defaultCores": 2
+      },
+      {
+        "name": "Opteron_G2",
+        "qemuType": "Opteron_G2",
+        "from": 2006,
+        "to": 2007,
+        "defaultCores": 2
+      },
+      {
+        "name": "Opteron_G3",
+        "qemuType": "Opteron_G3",
+        "from": 2007,
+        "to": 2010,
+        "defaultCores": 4
+      },
+      {
+        "name": "phenom",
+        "qemuType": "phenom",
+        "from": 2007,
+        "to": 2010,
+        "defaultCores": 4
+      },
+      {
+        "name": "Opteron_G4",
+        "qemuType": "Opteron_G4",
+        "from": 2011,
+        "to": 2012,
+        "defaultCores": 8
+      },
+      {
+        "name": "Opteron_G5",
+        "qemuType": "Opteron_G5",
+        "from": 2012,
+        "to": 2015,
+        "defaultCores": 8
+      },
+      {
+        "name": "Zen (Ryzen 1000)",
+        "qemuType": "EPYC-IBPB",
+        "from": 2017,
+        "to": 2018,
+        "defaultCores": 8,
+        "note": "first-generation ryzen desktop cpu"
+      },
+      {
+        "name": "EPYC",
+        "qemuType": "EPYC-IBPB",
+        "from": 2017,
+        "to": 2019,
+        "defaultCores": 16
+      },
+      {
+        "name": "Zen+ (Ryzen 2000)",
+        "qemuType": "EPYC-IBPB",
+        "from": 2018,
+        "to": 2019,
+        "defaultCores": 8,
+        "note": "12nm refresh of the original ryzen, higher clocks and tighter memory latency"
+      },
+      {
+        "name": "Zen 2 (Ryzen 3000)",
+        "qemuType": "EPYC-Rome",
+        "from": 2019,
+        "to": 2020,
+        "defaultCores": 8,
+        "note": "chiplet-based ryzen desktop cpu"
+      },
+      {
+        "name": "EPYC-Rome",
+        "qemuType": "EPYC-Rome",
+        "from": 2019,
+        "to": 2021,
+        "defaultCores": 24
+      },
+      {
+        "name": "Zen 3 (Ryzen 5000)",
+        "qemuType": "EPYC-Milan",
+        "from": 2020,
+        "to": 2022,
+        "defaultCores": 8,
+        "note": "ryzen desktop cpu with a unified 8-core cache complex"
+      },
+      {
+        "name": "EPYC-Milan",
+        "qemuType": "EPYC-Milan",
+        "from": 2021,
+        "to": 2022,
+        "defaultCores": 32
+      },
+      {
+        "name": "Zen 4 (Ryzen 7000)",
+        "qemuType": "EPYC-Genoa",
+        "from": 2022,
+        "to": 2024,
+        "defaultCores": 8,
+        "note": "ryzen desktop cpu; one of the first mainstream chips with avx-512"
+      },
+      {
+        "name": "EPYC-Genoa",
+        "qemuType": "EPYC-Genoa",
+        "from": 2022,
+        "to": 2024,
+        "defaultCores": 32
+      },
+      {
+        "name": "Zen 5 (Ryzen 9000)",
+        "qemuType": "EPYC-Turin",
+        "from": 2024,
+        "to": null,
+        "defaultCores": 8,
+        "note": "ryzen desktop cpu with native avx-512"
+      },
+      {
+        "name": "EPYC-Turin",
+        "qemuType": "EPYC-Turin",
+        "from": 2024,
+        "to": null,
+        "defaultCores": 32
+      }
+    ]
+  },
+  "cpu_types": {
+    "Conroe": {
+      "intel": [
+        "Conroe",
+        "Penryn",
+        "Nehalem",
+        "Westmere",
+        "SandyBridge",
+        "IvyBridge",
+        "Haswell",
+        "Broadwell",
+        "Skylake-Client",
+        "Skylake-Server",
+        "Cascadelake-Server",
+        "Cooperlake",
+        "KnightsMill",
+        "Icelake-Client",
+        "Icelake-Server",
+        "SapphireRapids",
+        "GraniteRapids",
+        "SierraForest",
+        "ClearwaterForest"
+      ],
+      "amd": [
+        "Opteron_G4",
+        "Opteron_G5",
+        "EPYC",
+        "EPYC-Rome",
+        "EPYC-Milan",
+        "EPYC-Genoa",
+        "EPYC-Turin"
+      ]
+    },
+    "Penryn": {
+      "intel": [
+        "Penryn",
+        "Nehalem",
+        "Westmere",
+        "SandyBridge",
+        "IvyBridge",
+        "Haswell",
+        "Broadwell",
+        "Skylake-Client",
+        "Skylake-Server",
+        "Cascadelake-Server",
+        "Cooperlake",
+        "KnightsMill",
+        "Icelake-Client",
+        "Icelake-Server",
+        "SapphireRapids",
+        "GraniteRapids",
+        "SierraForest",
+        "ClearwaterForest"
+      ],
+      "amd": [
+        "Opteron_G4",
+        "Opteron_G5",
+        "EPYC",
+        "EPYC-Rome",
+        "EPYC-Milan",
+        "EPYC-Genoa",
+        "EPYC-Turin"
+      ]
+    },
+    "Nehalem": {
+      "intel": [
+        "Nehalem",
+        "Westmere",
+        "SandyBridge",
+        "IvyBridge",
+        "Haswell",
+        "Broadwell",
+        "Skylake-Client",
+        "Skylake-Server",
+        "Cascadelake-Server",
+        "Cooperlake",
+        "KnightsMill",
+        "Icelake-Client",
+        "Icelake-Server",
+        "SapphireRapids",
+        "GraniteRapids",
+        "SierraForest",
+        "ClearwaterForest"
+      ],
+      "amd": [
+        "Opteron_G4",
+        "Opteron_G5",
+        "EPYC",
+        "EPYC-Rome",
+        "EPYC-Milan",
+        "EPYC-Genoa",
+        "EPYC-Turin"
+      ]
+    },
+    "Nehalem-IBRS": {
+      "intel": [
+        "Nehalem",
+        "Westmere",
+        "SandyBridge",
+        "IvyBridge",
+        "Haswell",
+        "Broadwell",
+        "Skylake-Client",
+        "Skylake-Server",
+        "Cascadelake-Server",
+        "Cooperlake",
+        "Icelake-Client",
+        "Icelake-Server",
+        "SapphireRapids",
+        "GraniteRapids",
+        "SierraForest",
+        "ClearwaterForest"
+      ],
+      "amd": []
+    },
+    "Westmere": {
+      "intel": [
+        "Westmere",
+        "SandyBridge",
+        "IvyBridge",
+        "Haswell",
+        "Broadwell",
+        "Skylake-Client",
+        "Skylake-Server",
+        "Cascadelake-Server",
+        "Cooperlake",
+        "KnightsMill",
+        "Icelake-Client",
+        "Icelake-Server",
+        "SapphireRapids",
+        "GraniteRapids",
+        "SierraForest",
+        "ClearwaterForest"
+      ],
+      "amd": [
+        "EPYC",
+        "EPYC-Rome",
+        "EPYC-Milan",
+        "EPYC-Genoa",
+        "EPYC-Turin"
+      ]
+    },
+    "Westmere-IBRS": {
+      "intel": [
+        "Westmere",
+        "SandyBridge",
+        "IvyBridge",
+        "Haswell",
+        "Broadwell",
+        "Skylake-Client",
+        "Skylake-Server",
+        "Cascadelake-Server",
+        "Cooperlake",
+        "Icelake-Client",
+        "Icelake-Server",
+        "SapphireRapids",
+        "GraniteRapids",
+        "SierraForest",
+        "ClearwaterForest"
+      ],
+      "amd": []
+    },
+    "SandyBridge": {
+      "intel": [
+        "SandyBridge",
+        "IvyBridge",
+        "Haswell",
+        "Broadwell",
+        "Skylake-Client",
+        "Skylake-Server",
+        "Cascadelake-Server",
+        "Cooperlake",
+        "KnightsMill",
+        "Icelake-Client",
+        "Icelake-Server",
+        "SapphireRapids",
+        "GraniteRapids",
+        "SierraForest",
+        "ClearwaterForest"
+      ],
+      "amd": [
+        "EPYC",
+        "EPYC-Rome",
+        "EPYC-Milan",
+        "EPYC-Genoa",
+        "EPYC-Turin"
+      ]
+    },
+    "SandyBridge-IBRS": {
+      "intel": [
+        "SandyBridge",
+        "IvyBridge",
+        "Haswell",
+        "Broadwell",
+        "Skylake-Client",
+        "Skylake-Server",
+        "Cascadelake-Server",
+        "Cooperlake",
+        "Icelake-Client",
+        "Icelake-Server",
+        "SapphireRapids",
+        "GraniteRapids",
+        "SierraForest",
+        "ClearwaterForest"
+      ],
+      "amd": []
+    },
+    "IvyBridge": {
+      "intel": [
+        "IvyBridge",
+        "Haswell",
+        "Broadwell",
+        "Skylake-Client",
+        "Skylake-Server",
+        "Cascadelake-Server",
+        "Cooperlake",
+        "KnightsMill",
+        "Icelake-Client",
+        "Icelake-Server",
+        "SapphireRapids",
+        "GraniteRapids",
+        "SierraForest",
+        "ClearwaterForest"
+      ],
+      "amd": [
+        "EPYC-Milan",
+        "EPYC-Genoa",
+        "EPYC-Turin"
+      ]
+    },
+    "IvyBridge-IBRS": {
+      "intel": [
+        "IvyBridge",
+        "Haswell",
+        "Broadwell",
+        "Skylake-Client",
+        "Skylake-Server",
+        "Cascadelake-Server",
+        "Cooperlake",
+        "Icelake-Client",
+        "Icelake-Server",
+        "SapphireRapids",
+        "GraniteRapids",
+        "SierraForest",
+        "ClearwaterForest"
+      ],
+      "amd": []
+    },
+    "Haswell": {
+      "intel": [
+        "Haswell",
+        "Broadwell",
+        "Skylake-Client",
+        "Skylake-Server",
+        "Cascadelake-Server",
+        "Cooperlake",
+        "Icelake-Client",
+        "Icelake-Server",
+        "SapphireRapids",
+        "GraniteRapids"
+      ],
+      "amd": []
+    },
+    "Haswell-IBRS": {
+      "intel": [
+        "Haswell",
+        "Broadwell",
+        "Skylake-Client",
+        "Skylake-Server",
+        "Cascadelake-Server",
+        "Cooperlake",
+        "Icelake-Client",
+        "Icelake-Server",
+        "SapphireRapids",
+        "GraniteRapids"
+      ],
+      "amd": []
+    },
+    "Haswell-noTSX": {
+      "intel": [
+        "Haswell",
+        "Broadwell",
+        "Skylake-Client",
+        "Skylake-Server",
+        "Cascadelake-Server",
+        "Cooperlake",
+        "Icelake-Client",
+        "Icelake-Server",
+        "SapphireRapids",
+        "GraniteRapids",
+        "SierraForest",
+        "ClearwaterForest"
+      ],
+      "amd": [
+        "EPYC-Milan",
+        "EPYC-Genoa",
+        "EPYC-Turin"
+      ]
+    },
+    "Haswell-noTSX-IBRS": {
+      "intel": [
+        "Haswell",
+        "Broadwell",
+        "Skylake-Client",
+        "Skylake-Server",
+        "Cascadelake-Server",
+        "Cooperlake",
+        "Icelake-Client",
+        "Icelake-Server",
+        "SapphireRapids",
+        "GraniteRapids",
+        "SierraForest",
+        "ClearwaterForest"
+      ],
+      "amd": []
+    },
+    "Broadwell": {
+      "intel": [
+        "Broadwell",
+        "Skylake-Client",
+        "Skylake-Server",
+        "Cascadelake-Server",
+        "Cooperlake",
+        "Icelake-Client",
+        "Icelake-Server",
+        "SapphireRapids",
+        "GraniteRapids"
+      ],
+      "amd": []
+    },
+    "Broadwell-IBRS": {
+      "intel": [
+        "Broadwell",
+        "Skylake-Client",
+        "Skylake-Server",
+        "Cascadelake-Server",
+        "Cooperlake",
+        "Icelake-Client",
+        "Icelake-Server",
+        "SapphireRapids",
+        "GraniteRapids"
+      ],
+      "amd": []
+    },
+    "Broadwell-noTSX": {
+      "intel": [
+        "Broadwell",
+        "Skylake-Client",
+        "Skylake-Server",
+        "Cascadelake-Server",
+        "Cooperlake",
+        "Icelake-Client",
+        "Icelake-Server",
+        "SapphireRapids",
+        "GraniteRapids",
+        "SierraForest",
+        "ClearwaterForest"
+      ],
+      "amd": [
+        "EPYC-Milan",
+        "EPYC-Genoa",
+        "EPYC-Turin"
+      ]
+    },
+    "Broadwell-noTSX-IBRS": {
+      "intel": [
+        "Broadwell",
+        "Skylake-Client",
+        "Skylake-Server",
+        "Cascadelake-Server",
+        "Cooperlake",
+        "Icelake-Client",
+        "Icelake-Server",
+        "SapphireRapids",
+        "GraniteRapids",
+        "SierraForest",
+        "ClearwaterForest"
+      ],
+      "amd": []
+    },
+    "Skylake-Client": {
+      "intel": [
+        "Skylake-Client",
+        "Skylake-Server",
+        "Cascadelake-Server",
+        "Cooperlake",
+        "Icelake-Client",
+        "Icelake-Server",
+        "SapphireRapids",
+        "GraniteRapids"
+      ],
+      "amd": []
+    },
+    "Skylake-Client-IBRS": {
+      "intel": [
+        "Skylake-Client",
+        "Skylake-Server",
+        "Cascadelake-Server",
+        "Cooperlake",
+        "Icelake-Client",
+        "Icelake-Server",
+        "SapphireRapids",
+        "GraniteRapids"
+      ],
+      "amd": []
+    },
+    "Skylake-Client-noTSX-IBRS": {
+      "intel": [
+        "Skylake-Client",
+        "Skylake-Server",
+        "Cascadelake-Server",
+        "Cooperlake",
+        "Icelake-Client",
+        "Icelake-Server",
+        "SapphireRapids",
+        "GraniteRapids",
+        "SierraForest",
+        "ClearwaterForest"
+      ],
+      "amd": []
+    },
+    "Skylake-Client-v4": {
+      "intel": [
+        "Skylake-Client",
+        "Skylake-Server",
+        "Cascadelake-Server",
+        "Cooperlake",
+        "Icelake-Server",
+        "SapphireRapids",
+        "GraniteRapids",
+        "SierraForest",
+        "ClearwaterForest"
+      ],
+      "amd": []
+    },
+    "Skylake-Server": {
+      "intel": [
+        "Skylake-Server",
+        "Cascadelake-Server",
+        "Cooperlake",
+        "Icelake-Server",
+        "SapphireRapids",
+        "GraniteRapids"
+      ],
+      "amd": []
+    },
+    "Skylake-Server-IBRS": {
+      "intel": [
+        "Skylake-Server",
+        "Cascadelake-Server",
+        "Cooperlake",
+        "Icelake-Server",
+        "SapphireRapids",
+        "GraniteRapids"
+      ],
+      "amd": []
+    },
+    "Skylake-Server-noTSX-IBRS": {
+      "intel": [
+        "Skylake-Server",
+        "Cascadelake-Server",
+        "Cooperlake",
+        "Icelake-Server",
+        "SapphireRapids",
+        "GraniteRapids"
+      ],
+      "amd": []
+    },
+    "Skylake-Server-v4": {
+      "intel": [
+        "Skylake-Server",
+        "Cascadelake-Server",
+        "Cooperlake",
+        "Icelake-Server",
+        "SapphireRapids",
+        "GraniteRapids"
+      ],
+      "amd": []
+    },
+    "Skylake-Server-v5": {
+      "intel": [
+        "Skylake-Server",
+        "Cascadelake-Server",
+        "Cooperlake",
+        "Icelake-Server",
+        "SapphireRapids",
+        "GraniteRapids"
+      ],
+      "amd": []
+    },
+    "Cascadelake-Server": {
+      "intel": [
+        "Cascadelake-Server",
+        "Cooperlake",
+        "Icelake-Server",
+        "SapphireRapids",
+        "GraniteRapids"
+      ],
+      "amd": []
+    },
+    "Cascadelake-Server-v2": {
+      "intel": [
+        "Cascadelake-Server",
+        "Cooperlake",
+        "Icelake-Server",
+        "SapphireRapids",
+        "GraniteRapids"
+      ],
+      "amd": []
+    },
+    "Cascadelake-Server-noTSX": {
+      "intel": [
+        "Cascadelake-Server",
+        "Cooperlake",
+        "Icelake-Server",
+        "SapphireRapids",
+        "GraniteRapids"
+      ],
+      "amd": []
+    },
+    "Cascadelake-Server-v4": {
+      "intel": [
+        "Cascadelake-Server",
+        "Cooperlake",
+        "Icelake-Server",
+        "SapphireRapids",
+        "GraniteRapids"
+      ],
+      "amd": []
+    },
+    "Cascadelake-Server-v5": {
+      "intel": [
+        "Cascadelake-Server",
+        "Cooperlake",
+        "Icelake-Server",
+        "SapphireRapids",
+        "GraniteRapids"
+      ],
+      "amd": []
+    },
+    "Cooperlake": {
+      "intel": [
+        "Cooperlake"
+      ],
+      "amd": []
+    },
+    "Cooperlake-v2": {
+      "intel": [
+        "Cooperlake"
+      ],
+      "amd": []
+    },
+    "KnightsMill": {
+      "intel": [
+        "KnightsMill"
+      ],
+      "amd": []
+    },
+    "Icelake-Client": {
+      "intel": [
+        "Icelake-Client",
+        "Icelake-Server",
+        "SapphireRapids",
+        "GraniteRapids"
+      ],
+      "amd": []
+    },
+    "Icelake-Client-noTSX": {
+      "intel": [
+        "Icelake-Client",
+        "Icelake-Server",
+        "SapphireRapids",
+        "GraniteRapids"
+      ],
+      "amd": []
+    },
+    "Icelake-Server": {
+      "intel": [
+        "Icelake-Server",
+        "SapphireRapids",
+        "GraniteRapids"
+      ],
+      "amd": []
+    },
+    "Icelake-Server-noTSX": {
+      "intel": [
+        "Icelake-Server",
+        "SapphireRapids",
+        "GraniteRapids"
+      ],
+      "amd": []
+    },
+    "Icelake-Server-v3": {
+      "intel": [
+        "Icelake-Server",
+        "SapphireRapids",
+        "GraniteRapids"
+      ],
+      "amd": []
+    },
+    "Icelake-Server-v4": {
+      "intel": [
+        "Icelake-Server",
+        "SapphireRapids",
+        "GraniteRapids"
+      ],
+      "amd": []
+    },
+    "Icelake-Server-v5": {
+      "intel": [
+        "Icelake-Server",
+        "SapphireRapids",
+        "GraniteRapids"
+      ],
+      "amd": []
+    },
+    "Icelake-Server-v6": {
+      "intel": [
+        "Icelake-Server",
+        "SapphireRapids",
+        "GraniteRapids"
+      ],
+      "amd": []
+    },
+    "Icelake-Server-v7": {
+      "intel": [
+        "Icelake-Server",
+        "SapphireRapids",
+        "GraniteRapids"
+      ],
+      "amd": []
+    },
+    "SapphireRapids": {
+      "intel": [
+        "SapphireRapids",
+        "GraniteRapids"
+      ],
+      "amd": []
+    },
+    "SapphireRapids-v2": {
+      "intel": [
+        "SapphireRapids",
+        "GraniteRapids"
+      ],
+      "amd": []
+    },
+    "SapphireRapids-v3": {
+      "intel": [
+        "SapphireRapids",
+        "GraniteRapids"
+      ],
+      "amd": []
+    },
+    "SapphireRapids-v4": {
+      "intel": [
+        "SapphireRapids",
+        "GraniteRapids"
+      ],
+      "amd": []
+    },
+    "GraniteRapids": {
+      "intel": [
+        "GraniteRapids"
+      ],
+      "amd": []
+    },
+    "GraniteRapids-v2": {
+      "intel": [
+        "GraniteRapids"
+      ],
+      "amd": []
+    },
+    "GraniteRapids-v3": {
+      "intel": [
+        "GraniteRapids"
+      ],
+      "amd": []
+    },
+    "SierraForest": {
+      "intel": [
+        "SierraForest",
+        "ClearwaterForest"
+      ],
+      "amd": []
+    },
+    "SierraForest-v2": {
+      "intel": [
+        "SierraForest",
+        "ClearwaterForest"
+      ],
+      "amd": []
+    },
+    "SierraForest-v3": {
+      "intel": [
+        "SierraForest",
+        "ClearwaterForest"
+      ],
+      "amd": []
+    },
+    "ClearwaterForest": {
+      "intel": [
+        "ClearwaterForest"
+      ],
+      "amd": []
+    },
+    "athlon": {
+      "intel": [],
+      "amd": [
+        "athlon",
+        "phenom"
+      ]
+    },
+    "phenom": {
+      "intel": [],
+      "amd": [
+        "phenom"
+      ]
+    },
+    "Opteron_G1": {
+      "intel": [
+        "Conroe",
+        "Penryn",
+        "Nehalem",
+        "Westmere",
+        "SandyBridge",
+        "IvyBridge",
+        "Haswell",
+        "Broadwell",
+        "Skylake-Client",
+        "Skylake-Server",
+        "Cascadelake-Server",
+        "Cooperlake",
+        "KnightsMill",
+        "Icelake-Client",
+        "Icelake-Server",
+        "SapphireRapids",
+        "GraniteRapids",
+        "SierraForest",
+        "ClearwaterForest"
+      ],
+      "amd": [
+        "phenom",
+        "Opteron_G1",
+        "Opteron_G2",
+        "Opteron_G3",
+        "Opteron_G4",
+        "Opteron_G5",
+        "EPYC",
+        "EPYC-Rome",
+        "EPYC-Milan",
+        "EPYC-Genoa",
+        "EPYC-Turin"
+      ]
+    },
+    "Opteron_G2": {
+      "intel": [
+        "Penryn",
+        "Nehalem",
+        "Westmere",
+        "SandyBridge",
+        "IvyBridge",
+        "Haswell",
+        "Broadwell",
+        "Skylake-Client",
+        "Skylake-Server",
+        "Cascadelake-Server",
+        "Cooperlake",
+        "KnightsMill",
+        "Icelake-Client",
+        "Icelake-Server",
+        "SapphireRapids",
+        "GraniteRapids",
+        "SierraForest",
+        "ClearwaterForest"
+      ],
+      "amd": [
+        "phenom",
+        "Opteron_G2",
+        "Opteron_G3",
+        "Opteron_G4",
+        "Opteron_G5",
+        "EPYC",
+        "EPYC-Rome",
+        "EPYC-Milan",
+        "EPYC-Genoa",
+        "EPYC-Turin"
+      ]
+    },
+    "Opteron_G3": {
+      "intel": [],
+      "amd": [
+        "Opteron_G3",
+        "EPYC",
+        "EPYC-Rome",
+        "EPYC-Milan",
+        "EPYC-Genoa",
+        "EPYC-Turin"
+      ]
+    },
+    "Opteron_G4": {
+      "intel": [],
+      "amd": [
+        "Opteron_G4",
+        "Opteron_G5"
+      ]
+    },
+    "Opteron_G5": {
+      "intel": [],
+      "amd": [
+        "Opteron_G5"
+      ]
+    },
+    "EPYC": {
+      "intel": [],
+      "amd": [
+        "EPYC",
+        "EPYC-Rome",
+        "EPYC-Milan",
+        "EPYC-Genoa",
+        "EPYC-Turin"
+      ]
+    },
+    "EPYC-IBPB": {
+      "intel": [],
+      "amd": [
+        "EPYC",
+        "EPYC-Rome",
+        "EPYC-Milan",
+        "EPYC-Genoa",
+        "EPYC-Turin"
+      ]
+    },
+    "EPYC-v3": {
+      "intel": [],
+      "amd": [
+        "EPYC",
+        "EPYC-Rome",
+        "EPYC-Milan",
+        "EPYC-Genoa",
+        "EPYC-Turin"
+      ]
+    },
+    "EPYC-v4": {
+      "intel": [],
+      "amd": [
+        "EPYC",
+        "EPYC-Rome",
+        "EPYC-Milan",
+        "EPYC-Genoa",
+        "EPYC-Turin"
+      ]
+    },
+    "EPYC-v5": {
+      "intel": [],
+      "amd": [
+        "EPYC",
+        "EPYC-Rome",
+        "EPYC-Milan",
+        "EPYC-Genoa",
+        "EPYC-Turin"
+      ]
+    },
+    "EPYC-Rome": {
+      "intel": [],
+      "amd": [
+        "EPYC-Rome",
+        "EPYC-Milan",
+        "EPYC-Genoa",
+        "EPYC-Turin"
+      ]
+    },
+    "EPYC-Rome-v2": {
+      "intel": [],
+      "amd": [
+        "EPYC-Rome",
+        "EPYC-Milan",
+        "EPYC-Genoa",
+        "EPYC-Turin"
+      ]
+    },
+    "EPYC-Rome-v3": {
+      "intel": [],
+      "amd": [
+        "EPYC-Rome",
+        "EPYC-Milan",
+        "EPYC-Genoa",
+        "EPYC-Turin"
+      ]
+    },
+    "EPYC-Rome-v4": {
+      "intel": [],
+      "amd": [
+        "EPYC-Rome",
+        "EPYC-Milan",
+        "EPYC-Genoa",
+        "EPYC-Turin"
+      ]
+    },
+    "EPYC-Rome-v5": {
+      "intel": [],
+      "amd": [
+        "EPYC-Rome",
+        "EPYC-Milan",
+        "EPYC-Genoa",
+        "EPYC-Turin"
+      ]
+    },
+    "EPYC-Milan": {
+      "intel": [],
+      "amd": [
+        "EPYC-Milan",
+        "EPYC-Genoa",
+        "EPYC-Turin"
+      ]
+    },
+    "EPYC-Milan-v2": {
+      "intel": [],
+      "amd": [
+        "EPYC-Milan",
+        "EPYC-Genoa",
+        "EPYC-Turin"
+      ]
+    },
+    "EPYC-Milan-v3": {
+      "intel": [],
+      "amd": [
+        "EPYC-Milan",
+        "EPYC-Genoa",
+        "EPYC-Turin"
+      ]
+    },
+    "EPYC-Genoa": {
+      "intel": [],
+      "amd": [
+        "EPYC-Genoa",
+        "EPYC-Turin"
+      ]
+    },
+    "EPYC-Genoa-v2": {
+      "intel": [],
+      "amd": [
+        "EPYC-Genoa",
+        "EPYC-Turin"
+      ]
+    },
+    "EPYC-Turin": {
+      "intel": [],
+      "amd": [
+        "EPYC-Turin"
+      ]
+    },
+    "kvm64": {
+      "intel": [
+        "Penryn",
+        "Nehalem",
+        "Westmere",
+        "SandyBridge",
+        "IvyBridge",
+        "Haswell",
+        "Broadwell",
+        "Skylake-Client",
+        "Skylake-Server",
+        "Cascadelake-Server",
+        "Cooperlake",
+        "KnightsMill",
+        "Icelake-Client",
+        "Icelake-Server",
+        "SapphireRapids",
+        "GraniteRapids",
+        "SierraForest",
+        "ClearwaterForest"
+      ],
+      "amd": [
+        "phenom",
+        "Opteron_G2",
+        "Opteron_G3",
+        "Opteron_G4",
+        "Opteron_G5",
+        "EPYC",
+        "EPYC-Rome",
+        "EPYC-Milan",
+        "EPYC-Genoa",
+        "EPYC-Turin"
+      ]
+    },
+    "qemu64": {
+      "intel": [
+        "Penryn",
+        "Nehalem",
+        "Westmere",
+        "SandyBridge",
+        "IvyBridge",
+        "Haswell",
+        "Broadwell",
+        "Skylake-Client",
+        "Skylake-Server",
+        "Cascadelake-Server",
+        "Cooperlake",
+        "KnightsMill",
+        "Icelake-Client",
+        "Icelake-Server",
+        "SapphireRapids",
+        "GraniteRapids",
+        "SierraForest",
+        "ClearwaterForest"
+      ],
+      "amd": [
+        "phenom",
+        "Opteron_G2",
+        "Opteron_G3",
+        "Opteron_G4",
+        "Opteron_G5",
+        "EPYC",
+        "EPYC-Rome",
+        "EPYC-Milan",
+        "EPYC-Genoa",
+        "EPYC-Turin"
+      ]
+    },
+    "max": {
+      "intel": [
+        "Conroe",
+        "Penryn",
+        "Nehalem",
+        "Westmere",
+        "SandyBridge",
+        "IvyBridge",
+        "Haswell",
+        "Broadwell",
+        "Skylake-Client",
+        "Skylake-Server",
+        "Cascadelake-Server",
+        "Cooperlake",
+        "KnightsMill",
+        "Icelake-Client",
+        "Icelake-Server",
+        "SapphireRapids",
+        "GraniteRapids",
+        "SierraForest",
+        "ClearwaterForest"
+      ],
+      "amd": [
+        "athlon",
+        "phenom",
+        "Opteron_G1",
+        "Opteron_G2",
+        "Opteron_G3",
+        "Opteron_G4",
+        "Opteron_G5",
+        "EPYC",
+        "EPYC-Rome",
+        "EPYC-Milan",
+        "EPYC-Genoa",
+        "EPYC-Turin"
+      ]
+    },
+    "x86-64-v2": {
+      "intel": [
+        "Nehalem",
+        "Westmere",
+        "SandyBridge",
+        "IvyBridge",
+        "Haswell",
+        "Broadwell",
+        "Skylake-Client",
+        "Skylake-Server",
+        "Cascadelake-Server",
+        "Cooperlake",
+        "KnightsMill",
+        "Icelake-Client",
+        "Icelake-Server",
+        "SapphireRapids",
+        "GraniteRapids",
+        "SierraForest",
+        "ClearwaterForest"
+      ],
+      "amd": [
+        "Opteron_G4",
+        "Opteron_G5",
+        "EPYC",
+        "EPYC-Rome",
+        "EPYC-Milan",
+        "EPYC-Genoa",
+        "EPYC-Turin"
+      ]
+    },
+    "x86-64-v2-AES": {
+      "intel": [
+        "Westmere",
+        "SandyBridge",
+        "IvyBridge",
+        "Haswell",
+        "Broadwell",
+        "Skylake-Client",
+        "Skylake-Server",
+        "Cascadelake-Server",
+        "Cooperlake",
+        "KnightsMill",
+        "Icelake-Client",
+        "Icelake-Server",
+        "SapphireRapids",
+        "GraniteRapids",
+        "SierraForest",
+        "ClearwaterForest"
+      ],
+      "amd": [
+        "Opteron_G4",
+        "Opteron_G5",
+        "EPYC",
+        "EPYC-Rome",
+        "EPYC-Milan",
+        "EPYC-Genoa",
+        "EPYC-Turin"
+      ]
+    },
+    "x86-64-v3": {
+      "intel": [
+        "Haswell",
+        "Broadwell",
+        "Skylake-Client",
+        "Skylake-Server",
+        "Cascadelake-Server",
+        "Cooperlake",
+        "KnightsMill",
+        "Icelake-Client",
+        "Icelake-Server",
+        "SapphireRapids",
+        "GraniteRapids",
+        "SierraForest",
+        "ClearwaterForest"
+      ],
+      "amd": [
+        "EPYC",
+        "EPYC-Rome",
+        "EPYC-Milan",
+        "EPYC-Genoa",
+        "EPYC-Turin"
+      ]
+    },
+    "x86-64-v4": {
+      "intel": [
+        "Skylake-Server",
+        "Cascadelake-Server",
+        "Cooperlake",
+        "Icelake-Client",
+        "Icelake-Server",
+        "SapphireRapids",
+        "GraniteRapids"
+      ],
+      "amd": [
+        "EPYC-Genoa",
+        "EPYC-Turin"
+      ]
+    },
+    "host": {
+      "intel": [
+        "Conroe",
+        "Penryn",
+        "Nehalem",
+        "Westmere",
+        "SandyBridge",
+        "IvyBridge",
+        "Haswell",
+        "Broadwell",
+        "Skylake-Client",
+        "Skylake-Server",
+        "Cascadelake-Server",
+        "Cooperlake",
+        "KnightsMill",
+        "Icelake-Client",
+        "Icelake-Server",
+        "SapphireRapids",
+        "GraniteRapids",
+        "SierraForest",
+        "ClearwaterForest"
+      ],
+      "amd": [
+        "athlon",
+        "phenom",
+        "Opteron_G1",
+        "Opteron_G2",
+        "Opteron_G3",
+        "Opteron_G4",
+        "Opteron_G5",
+        "EPYC",
+        "EPYC-Rome",
+        "EPYC-Milan",
+        "EPYC-Genoa",
+        "EPYC-Turin"
+      ]
+    }
+  }
+}
