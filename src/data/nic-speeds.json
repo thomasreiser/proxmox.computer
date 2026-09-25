@@ -1,0 +1,7 @@
+[
+  { "value": "1gbe", "label": "1 gbe" },
+  { "value": "2.5gbe", "label": "2.5 gbe" },
+  { "value": "10gbe", "label": "10 gbe", "hint": "sfp+ or rj45" },
+  { "value": "25gbe", "label": "25 gbe+", "hint": "sfp28 or better" },
+  { "value": "other", "label": "other / not sure" }
+]
