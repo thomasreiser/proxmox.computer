@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Background,
   BackgroundVariant,
@@ -12,6 +12,7 @@ import {
   useEdgesState,
   useNodesState,
   useReactFlow,
+  useUpdateNodeInternals,
   type Edge,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
@@ -33,7 +34,7 @@ const SWITCH_NAME = "switch-01";
 // wildly wrong (a card can now be quite tall: one interface may list up to
 // MAX_BRIDGES_PER_INTERFACE bridges).
 function estimateHeight(topology: NodeTopology): number {
-  let h = 90;
+  let h = 146; // header + the dedicated port strip at the bottom
   for (const iface of topology.interfaces) {
     const bridgeLines = Math.max(1, iface.bridges.length);
     h += 24 + (iface.bond ? 30 : 0) + bridgeLines * 22 + iface.nicIndices.length * 28;
@@ -66,14 +67,28 @@ function layout(topologies: NodeTopology[]): { nodes: (NetworkNodeCardNode | Swi
         sourceHandle: `nic-${cable.nicIndex}`,
         target: "switch",
         targetHandle: cable.id,
-        type: "smoothstep",
+        // both ends sit in an identically-shaped css grid (see
+        // .pc-netcard__portstrip / .pc-switch__ports), so a nic and its
+        // switch port already land at the same x — "straight" draws that
+        // as one direct, uninterrupted line instead of routing a bend
+        // that isn't needed.
+        type: "straight",
         // the card above already lists every bridge/vlan this interface
         // carries — repeating that whole list on the cable too (once per
         // bonded member) is what made this unreadable. the bond's name,
         // once per group, is the one thing worth a cable label: it's
         // short, and it names the grouping the color is already showing.
         label: isFirstInGroup ? cable.iface.bond?.name : undefined,
-        style: { stroke: cable.iface.colorVar, strokeWidth: cable.iface.bond ? 2 : 1.5 },
+        style: { stroke: cable.iface.colorVar, strokeWidth: cable.iface.bond ? 2.5 : 2 },
+        // react flow's own default puts an edge's z-index at the same
+        // tier as an unelevated node (both effectively 0), so whichever
+        // renders second wins — the switch, being last in the nodes
+        // array, was winning, and its own opaque body was painting over
+        // the whole segment of every cable that (deliberately) travels
+        // *into* it to reach a port near its center. edges need to sit
+        // above every node for this design to make sense at all, so
+        // this is set unconditionally high rather than tuned per-node.
+        zIndex: 1000,
       };
     }),
   );
@@ -116,30 +131,85 @@ function NetworkCanvas({
 }) {
   const initialLayout = useMemo(() => layout(topologies), [topologies]);
   const [flowNodes, setFlowNodes, onNodesChange] = useNodesState(initialLayout.nodes);
-  const [flowEdges, setFlowEdges, onEdgesChange] = useEdgesState(initialLayout.edges);
+  // starts empty rather than initialLayout.edges — see the effect below
+  // for why edges are only ever handed to react flow once their handles
+  // are confirmed mounted, never on the same tick as the nodes.
+  const [flowEdges, setFlowEdges, onEdgesChange] = useEdgesState<Edge>([]);
   const { fitView } = useReactFlow();
+  const updateNodeInternals = useUpdateNodeInternals();
+  // which initialLayout's edges have already been committed — read by the
+  // measurement effect below so it hands over edges exactly once per
+  // layout, not every time it re-fires (e.g. for the switch reposition).
+  const edgesCommittedForRef = useRef<typeof initialLayout | null>(null);
 
   // topologies changed (different save loaded, homelab vlan edited, ...) —
-  // rebuild from scratch rather than trying to diff the old layout.
+  // rebuild from scratch rather than trying to diff the old layout. edges
+  // are deliberately cleared here, not set — see the effect below for why
+  // they're only ever handed to react flow once their handles are
+  // confirmed mounted.
   useEffect(() => {
     setFlowNodes(initialLayout.nodes);
-    setFlowEdges(initialLayout.edges);
-  }, [initialLayout, setFlowNodes, setFlowEdges]);
+    setFlowEdges([]);
+    edgesCommittedForRef.current = null;
 
-  // once every node card has been measured, slide the switch to sit right
-  // below the tallest one — this is what actually keeps the cables
-  // visible, regardless of how tall a card's bridge list grows.
+    // belt-and-suspenders: the measurement effect below is the normal,
+    // accurate path — it commits edges the moment every card reports a
+    // real height, which is what guarantees each cable actually lands on
+    // its handle. that signal depends on ResizeObserver firing, though,
+    // which some browser states (a backgrounded/inactive tab, a very
+    // slow device) can delay well past when a visitor expects to see
+    // something. if measurement hasn't already committed edges by then,
+    // this commits them anyway using the as-laid-out positions, so the
+    // diagram is never left permanently wireless — worst case it's very
+    // briefly less precisely aligned, not simply blank.
+    const fallback = setTimeout(() => {
+      if (edgesCommittedForRef.current !== initialLayout) {
+        edgesCommittedForRef.current = initialLayout;
+        updateNodeInternals(initialLayout.nodes.map((n) => n.id));
+        setFlowEdges(initialLayout.edges);
+      }
+    }, 600);
+    return () => clearTimeout(fallback);
+  }, [initialLayout, setFlowNodes, setFlowEdges, updateNodeInternals]);
+
+  // once every node card has been measured (a real dom mount — a rough
+  // requestAnimationFrame delay turned out not to be a reliable enough
+  // signal for this, it can get skipped/delayed depending on the tab's
+  // paint state), this does two independent jobs gated on that same
+  // signal:
+  //  1. slide the switch to sit right below the tallest card — what
+  //     actually keeps the cables visible, regardless of how tall a
+  //     card's bridge list grows.
+  //  2. hand react flow the real edges for the first time. each node
+  //     here carries a different number of handles depending on the data
+  //     (one per cable), and react flow resolves an edge's handles
+  //     against whatever is registered at the moment the edge is set —
+  //     handing them over before those dynamic handles have actually
+  //     mounted leaves the edge permanently anchored to a stale/default
+  //     point (or undrawn), since nothing later re-resolves an edge that
+  //     already "succeeded" once. "cards are measured" is proof the real
+  //     dom, handles included, now exists, so it's safe to explicitly
+  //     tell react flow to (re)measure them and commit the edges that
+  //     reference them — guarded to run once per layout generation.
   useEffect(() => {
     const cards = flowNodes.filter(isNetworkNodeCard);
     if (cards.length === 0 || !cards.every((n) => typeof n.measured?.height === "number")) return;
+
     const desiredY = Math.max(...cards.map((n) => n.position.y + (n.measured?.height ?? 0))) + GAP;
     const switchNode = flowNodes.find((n) => n.id === "switch");
-    if (!switchNode || switchNode.position.y === desiredY) return;
-    setFlowNodes((nodes) => nodes.map((n) => (n.id === "switch" ? { ...n, position: { ...n.position, y: desiredY } } : n)));
-    // let the new position actually apply to the dom before refitting —
-    // fitView only runs once on mount otherwise, against the old guess.
-    requestAnimationFrame(() => fitView({ padding: 0.18 }));
-  }, [flowNodes, setFlowNodes, fitView]);
+    if (switchNode && switchNode.position.y !== desiredY) {
+      setFlowNodes((nodes) => nodes.map((n) => (n.id === "switch" ? { ...n, position: { ...n.position, y: desiredY } } : n)));
+      // let the new position actually apply to the dom before refitting —
+      // fitView only runs once on mount otherwise, against the old guess.
+      requestAnimationFrame(() => fitView({ padding: 0.18 }));
+    }
+
+    if (edgesCommittedForRef.current !== initialLayout) {
+      edgesCommittedForRef.current = initialLayout;
+      updateNodeInternals(flowNodes.map((n) => n.id));
+      setFlowEdges(initialLayout.edges);
+    }
+  }, [flowNodes, setFlowNodes, setFlowEdges, fitView, initialLayout, updateNodeInternals]);
 
   return (
     <div className="pc-canvas pc-canvas--tall">

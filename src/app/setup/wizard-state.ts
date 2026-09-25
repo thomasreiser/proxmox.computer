@@ -76,10 +76,10 @@ export interface BondConfig {
   mode: BondMode;
   // indices into node.nics; a bond isn't "real" until it has 2+
   nicIndices: number[];
-  // optional — the vlan this bond's own native/untagged link actually
-  // rides, if you know and care to record it (overrides the cluster-wide
-  // "main homelab vlan" for this one bond specifically). "" means "use
-  // the cluster default, or don't know" — most bonds leave this blank.
+  // optional — tags this bond's own link at a specific vlan (802.1q),
+  // instead of leaving it as a plain untagged/native link on the
+  // cluster-wide "main homelab vlan". "" means "plain native link, on
+  // the cluster default" — most bonds leave this blank.
   vlanTag: string;
 }
 

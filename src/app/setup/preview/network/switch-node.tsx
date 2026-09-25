@@ -8,9 +8,11 @@ export type SwitchNodeType = Node<SwitchNodeData, "switch">;
 
 // the switch's port ids match a cable's id exactly (see topology.ts) — no
 // separate numbering scheme, so a cable's two ends are always trivially
-// the same string. each group's width/gap is hardcoded in globals.css to
-// match CARD_WIDTH/GAP in page.tsx, so a group always sits directly under
-// the node card it belongs to and cables run close to straight down.
+// the same string. each group is exactly CARD_WIDTH wide (see page.tsx),
+// laid out as a same-column-count css grid as the node card's own port
+// strip above it — equal-width columns in the same nic order on both
+// ends is what keeps every cable a straight, non-crossing drop, not
+// anything computed per cable.
 export function SwitchNode({ data }: NodeProps<SwitchNodeType>) {
   const { name, topologies } = data;
 
@@ -27,14 +29,23 @@ export function SwitchNode({ data }: NodeProps<SwitchNodeType>) {
           <div key={topology.nodeIndex} className="pc-switch__group">
             <div className="pc-switch__ports">
               {topology.cables.map((cable) => (
-                <div key={cable.id} className="pc-switch__port" title={`${topology.node.name} — ${cable.nicName}`}>
+                <div key={cable.id} className="pc-switch__portbox" title={`${topology.node.name} — ${cable.nicName}`}>
                   <Handle
                     type="target"
                     position={Position.Top}
                     id={cable.id}
                     isConnectable={false}
                     className="pc-switch__plug"
-                    style={cable.iface.bond ? { background: cable.iface.colorVar, borderColor: cable.iface.colorVar } : undefined}
+                    // Position.Top's default css straddles the box's
+                    // border (half in, half out) — pull it to the box's
+                    // actual center so the cable reads as plugged into
+                    // the port, not just touching its top edge.
+                    style={{
+                      background: cable.iface.colorVar,
+                      borderColor: cable.iface.colorVar,
+                      top: "50%",
+                      transform: "translate(-50%, -50%)",
+                    }}
                   />
                 </div>
               ))}

@@ -412,23 +412,30 @@ body {
 .pc-netcard__bridge--warn { color: var(--warning); }
 .pc-netcard__mgmt { color: var(--ink-dim); text-transform: uppercase; letter-spacing: 0.06em; font-size: 10px; border: 1px solid var(--border); padding: 1px 4px; margin-left: auto; }
 .pc-netcard__value--dim { color: var(--ink-muted); }
-.pc-netcard__port { position: relative; display: flex; align-items: baseline; gap: var(--space-2); padding-left: var(--space-3); }
+.pc-netcard__port { display: flex; align-items: baseline; gap: var(--space-2); }
 .pc-netcard__portname { color: var(--ink); flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* ports sit at the bottom edge of the card — cables drop straight down
-   onto the switch below, rather than off to the side. */
-.pc-canvas .pc-netcard__plug { width: 8px; height: 8px; bottom: -16px; border-radius: var(--radius-none); border: 1px solid var(--surface-200); background: var(--border-strong); }
+/* the physical port strip: a css grid with one equal-width column per
+   nic, in nic order — .pc-switch__ports below uses the identical grid
+   (same column count, same total width, no horizontal padding on either)
+   so a nic's box and its switch port land at the exact same x, and every
+   cable between them is a straight, uninterrupted, non-crossing drop. */
+.pc-netcard__portstrip { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; padding: var(--space-2) 0; border-top: 1px solid var(--border-strong); background: var(--surface-400); }
+.pc-netcard__portbox { position: relative; display: flex; flex-direction: column; align-items: center; gap: 2px; min-width: 0; margin: 0 3px; padding: var(--space-1) 2px; border: 1px solid var(--border-strong); background: var(--surface-300); }
+.pc-netcard__portboxlabel { color: var(--ink-muted); font-size: 10px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* the box sits flush with the card's bottom edge, its plug just below
+   that edge — cables leave from a fixed, visible point every time. */
+.pc-canvas .pc-netcard__plug { width: 8px; height: 8px; bottom: -5px; border-radius: var(--radius-none); border: 1px solid var(--surface-200); background: var(--border-strong); }
 
 /* Switch — one wide card, ports grouped by which node they belong to.
    .pc-switch__group's width (320px) and .pc-switch__groups' gap (64px)
    are hand-matched to CARD_WIDTH/GAP in preview/network/page.tsx, so
-   each group sits directly under the node card it belongs to and cables
-   run close to straight down instead of crossing all over the canvas. */
+   each group sits directly under the node card it belongs to. */
 .pc-switch { border: 1px solid var(--border-strong); background: var(--surface-200); box-shadow: var(--inset-hairline); }
 .pc-switch__head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-2); padding: var(--space-3); border-bottom: 1px solid var(--border-strong); background: var(--surface-400); }
 .pc-switch__name { color: var(--accent); font-weight: 700; }
 .pc-switch__value--dim { color: var(--ink-muted); }
 .pc-switch__groups { display: flex; gap: 64px; }
 .pc-switch__group:nth-child(even) { background: var(--surface-100); }
-.pc-switch__ports { width: 320px; box-sizing: border-box; display: flex; flex-wrap: wrap; align-content: flex-start; gap: var(--space-4); padding: var(--space-4); }
-.pc-switch__port { position: relative; width: 10px; height: 10px; }
-.pc-canvas .pc-switch__plug { width: 10px; height: 10px; border-radius: var(--radius-none); border: 1px solid var(--surface-200); background: var(--border-strong); }
+.pc-switch__ports { width: 320px; box-sizing: border-box; display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; padding: var(--space-4) 0; }
+.pc-switch__portbox { position: relative; height: 20px; margin: 0 3px; border: 1px solid var(--border-strong); background: var(--surface-300); }
+.pc-canvas .pc-switch__plug { width: 8px; height: 8px; top: -5px; border-radius: var(--radius-none); border: 1px solid var(--surface-200); background: var(--border-strong); }

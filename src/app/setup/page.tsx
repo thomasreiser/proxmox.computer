@@ -1839,7 +1839,7 @@ function BondFields({
             </div>
             <span className="body-sm pc-field__hint">
               {bondVlanError ??
-                "only if this bond's own native link rides a numbered vlan — overrides the main homelab vlan for this bond, leave blank otherwise"}
+                "tags this bond's own link at that vlan instead of leaving it native/untagged — leave blank for a plain native link on the main homelab vlan"}
             </span>
           </div>
         </div>

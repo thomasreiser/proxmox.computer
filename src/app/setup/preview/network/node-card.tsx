@@ -62,17 +62,31 @@ export function NetworkNodeCard({ data }: NodeProps<NetworkNodeCardNode>) {
                 <div key={nicIndex} className="pc-netcard__port">
                   <span className="code pc-netcard__portname">{nic.name}</span>
                   <span className="body-sm pc-netcard__value--dim">{nicSpeedLabel(nic.speed)}</span>
-                  <Handle
-                    type="source"
-                    position={Position.Bottom}
-                    id={`nic-${nicIndex}`}
-                    isConnectable={false}
-                    className="pc-netcard__plug"
-                    style={iface.bond ? { background: iface.colorVar, borderColor: iface.colorVar } : undefined}
-                  />
                 </div>
               );
             })}
+          </div>
+        ))}
+      </div>
+
+      {/* the actual cabling anchors, kept apart from the bridge/vlan
+          breakdown above: one evenly-spaced box per physical nic, in nic
+          order, matching the switch's own port strip below it box-for-box.
+          same spacing on both ends means every cable is a clean, direct,
+          non-crossing drop — not something computed per bridge/bond, so
+          it stays true no matter how tall the info above gets. */}
+      <div className="pc-netcard__portstrip">
+        {topology.cables.map((cable) => (
+          <div key={cable.id} className="pc-netcard__portbox" style={{ borderColor: cable.iface.colorVar }}>
+            <span className="meta pc-netcard__portboxlabel">{cable.nicName}</span>
+            <Handle
+              type="source"
+              position={Position.Bottom}
+              id={`nic-${cable.nicIndex}`}
+              isConnectable={false}
+              className="pc-netcard__plug"
+              style={{ background: cable.iface.colorVar, borderColor: cable.iface.colorVar }}
+            />
           </div>
         ))}
       </div>

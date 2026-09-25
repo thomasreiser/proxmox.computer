@@ -13,15 +13,16 @@ import {
   type NodeInfo,
 } from "../../wizard-state";
 
-// what a bridge's slot actually carries: the interface's one native/
-// untagged bridge (index 0 — "unset" can't happen here, it's never asked
-// for) — homelabVlan is whatever this specific interface resolves to
-// (its own bond's vlan tag if it set one, else the cluster-wide "main
-// homelab vlan", else null), already resolved by the time this is built;
-// an extra bridge properly stacked on a real vlan via 802.1q; or an extra
-// bridge the visitor has added but not yet given a vlan tag, which is a
-// distinct, in-progress state from "untagged" and shouldn't be silently
-// drawn as if it were the native one.
+// what a bridge's slot actually carries: the interface's one plain
+// untagged/native bridge (index 0, when its bond has no vlan override of
+// its own — homelabVlan is the cluster-wide "main homelab vlan", already
+// resolved by the time this is built, or null if that's unset too); a
+// bridge properly stacked on a real vlan via 802.1q — either an extra
+// bridge (index 1+) or index 0 itself when its own bond was given a vlan
+// tag, since that makes the bond's own link tagged rather than native; or
+// an extra bridge the visitor has added but not yet given a vlan tag,
+// which is a distinct, in-progress state from "untagged" and shouldn't be
+// silently drawn as if it were the native one.
 export type BridgeVlan =
   | { kind: "native"; homelabVlan: number | null }
   | { kind: "tagged"; tag: number }
@@ -152,10 +153,13 @@ export function buildClusterTopology(nodes: NodeInfo[], homelabVlan: number | nu
       const nicIndices = bondConfig ? bondConfig.nicIndices : [Number(ref.id.slice("nic-".length))];
 
       const colorVar = bondConfig ? `var(${BOND_COLORS[bondColorCount++ % BOND_COLORS.length]})` : NEUTRAL_CABLE_COLOR;
-      // a bond's own vlan tag, when it has one, describes this specific
-      // link's native segment more precisely than the cluster-wide
-      // default — so it wins; ungrouped nics have no such override.
-      const effectiveHomelabVlan = (bondConfig && parseVlanNumber(bondConfig.vlanTag)) || homelabVlan;
+      // a bond's own vlan tag, when set, means this bond's link is itself
+      // tagged (802.1q) at that vlan — not the plain untagged/native link
+      // the cluster's homelabVlan describes. so it replaces the native
+      // slot's "native" kind entirely rather than just attaching a number
+      // to it; ungrouped nics have no such override and always fall back
+      // to the cluster-wide native vlan.
+      const bondVlanOverride = bondConfig ? parseVlanNumber(bondConfig.vlanTag) : null;
 
       const count = bridgeCountFor(node.network.bridgeCounts, ref.id);
       const bridges: BridgeSummary[] = [];
@@ -163,7 +167,11 @@ export function buildClusterTopology(nodes: NodeInfo[], homelabVlan: number | nu
         const bridge = node.network.bridges[bridgeKey(ref.id, idx)];
         if (!bridge || !bridge.enabled) continue;
         const vlan: BridgeVlan =
-          idx === 0 ? { kind: "native", homelabVlan: effectiveHomelabVlan } : parseVlanTag(bridge.vlanTag);
+          idx === 0
+            ? bondVlanOverride !== null
+              ? { kind: "tagged", tag: bondVlanOverride }
+              : { kind: "native", homelabVlan }
+            : parseVlanTag(bridge.vlanTag);
         bridges.push({ name: bridge.name, vlan, purposes: bridge.purposes });
       }
 
