@@ -1,42 +1,39 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import wizardSteps from "@/data/wizard-steps.json";
-import nicSpeedsData from "@/data/nic-speeds.json";
 import cpuVendorsData from "@/data/cpu-vendors.json";
 import cpuFamiliesData from "@/data/cpu-families.json";
-
-type CpuVendor = "intel" | "amd";
-type DiskType = "nvme" | "ssd" | "hdd";
-type NicSpeed = "1gbe" | "2.5gbe" | "10gbe" | "25gbe" | "other";
-type WizardStepId = "hardware" | "network";
-
-interface NicInfo {
-  speed: NicSpeed;
-  name: string;
-}
-
-interface AdditionalDisk {
-  type: DiskType;
-  sizeGb: string;
-  name: string;
-}
-
-interface HardwareSpec {
-  cpuVendor: CpuVendor;
-  cpuFamily: string;
-  cpuCount: string;
-  coresPerCpu: string;
-  ramGb: string;
-  bootDiskType: DiskType;
-  bootDiskSizeGb: string;
-  bootDiskName: string;
-  additionalDiskCount: string;
-  additionalDisks: AdditionalDisk[];
-  nicCount: string;
-  nics: NicInfo[];
-}
+import {
+  BOND_MODE_OPTIONS,
+  bridgeCountFor,
+  bridgeKey,
+  interfacesFor,
+  loadPersistedState,
+  MAX_BRIDGES_PER_INTERFACE,
+  MAX_NICS_PER_NODE,
+  nicSpeedLabel,
+  nicSpeedOptions,
+  STORAGE_KEY,
+  STORAGE_VERSION,
+  type AdditionalDisk,
+  type BondConfig,
+  type BondMode,
+  type BridgeConfig,
+  type CpuVendor,
+  type DiskType,
+  type HardwareSpec,
+  type InterfacePurpose,
+  type NicInfo,
+  type NicSpeed,
+  type NodeInfo,
+  type NodeNetwork,
+  type PersistedState,
+  type StorageHaMode,
+  type WizardStepId,
+} from "./wizard-state";
 
 const DISK_NAME_PRESETS = ["boot", "vm-storage", "backup", "iso", "storage-1", "storage-2", "ceph-osd-1", "ceph-osd-2"];
 const NIC_NAME_PRESETS = ["onboard", "lan", "wan", "management", "storage", "cluster", "vmotion", "corosync"];
@@ -48,8 +45,6 @@ function defaultNicName(index: number): string {
 function defaultAdditionalDisk(index: number): AdditionalDisk {
   return { type: "hdd", sizeGb: "", name: `storage-${index + 1}` };
 }
-
-type InterfacePurpose = "vm" | "ceph" | "zfs" | "backup" | "cluster" | "other";
 
 interface PurposeInfo {
   value: InterfacePurpose;
@@ -103,6 +98,14 @@ function purposeInfoFor(purpose: InterfacePurpose): PurposeInfo {
   return INTERFACE_PURPOSE_OPTIONS.find((p) => p.value === purpose) ?? INTERFACE_PURPOSE_OPTIONS[0];
 }
 
+// the same wording the "used for" checkboxes above already use — shown
+// again as a small sub-headline on this bridge's own ip/network field, so
+// a field far from those checkboxes (or, under "identical network
+// setup", in an entirely different section) still says what it's for.
+function purposesUsedForLabel(purposes: InterfacePurpose[]): string {
+  return purposes.map((p) => purposeInfoFor(p).label).join(", ");
+}
+
 // a real nic/bridge often earns its keep serving more than one purpose at
 // once (vm traffic + corosync is a completely normal homelab setup) — so
 // this is a set, not a single choice. it's still enforced to be non-empty
@@ -120,30 +123,6 @@ function requiredIpHintFor(purposes: InterfacePurpose[], otherNeedsHostIp: boole
     .map((info) => info.hint)
     .join("; ");
 }
-
-interface BridgeConfig {
-  enabled: boolean;
-  name: string;
-  purposes: InterfacePurpose[];
-  // only meaningful when purposes includes "other" — the answer to "does
-  // the node itself need an address here?" for that one ambiguous case.
-  otherNeedsHostIp: boolean;
-  // a required host ip+cidr when any selected purpose needs one (ceph,
-  // backups, cluster, or "other" answered yes); an optional bare
-  // network/cidr — just documenting the intended vm subnet — otherwise.
-  ip: string;
-  // "" for a bridge at index 0 of its interface (always untagged/native —
-  // one nic or bond can only carry one untagged bridge). a bridge at
-  // index 1+ shares the same physical nic/bond with a sibling, which is
-  // only valid in linux if each one rides its own vlan, so this becomes
-  // required and must be unique among that interface's other bridges.
-  vlanTag: string;
-}
-
-// the cluster-wide decision of how vm/ct storage stays available across
-// nodes — drives whether "ceph" or "zfs replication" is even offered as a
-// nic purpose below, and only matters once there's more than 1 node.
-type StorageHaMode = "ceph" | "zfs-replication" | "none";
 
 interface StorageHaInfo {
   value: StorageHaMode;
@@ -178,6 +157,15 @@ function minAdditionalDisks(nodes: NodeInfo[]): number {
   return Math.min(...nodes.map((n) => n.additionalDisks.length));
 }
 
+// same worst-equipped-node logic as minAdditionalDisks above — a node's
+// bonds are cut from its own nic pool, but the "number of bonds" field is
+// one shared control, so its ceiling has to fit every node at once, not
+// just the one currently being edited.
+function maxBondsForCluster(nodes: NodeInfo[]): number {
+  if (nodes.length === 0) return 0;
+  return Math.min(...nodes.map((n) => Number(n.nicCount) || 1));
+}
+
 // both ceph (osds) and a replicated zfs pool want storage dedicated to
 // them, not the boot/root disk doing double duty — so either is only
 // offered once every node has at least one disk beyond its boot disk.
@@ -201,76 +189,8 @@ function activeStoragePurpose(mode: StorageHaMode): InterfacePurpose | null {
   return null;
 }
 
-type BondMode = "active-backup" | "lacp" | "balance-alb" | "balance-rr";
-
-interface BondConfig {
-  name: string;
-  mode: BondMode;
-  // indices into node.nics; a bond isn't "real" until it has 2+
-  nicIndices: number[];
-}
-
-const BOND_MODE_OPTIONS: { value: BondMode; label: string; hint: string }[] = [
-  {
-    value: "active-backup",
-    label: "active-backup",
-    hint: "one link active, the other cold for failover — no switch config needed",
-  },
-  {
-    value: "lacp",
-    label: "lacp (802.3ad)",
-    hint: "combines bandwidth from every link — needs lacp configured on the switch port",
-  },
-  {
-    value: "balance-alb",
-    label: "balance-alb",
-    hint: "load-balances outgoing traffic across links — no switch config needed, but fewer guarantees than lacp",
-  },
-  {
-    value: "balance-rr",
-    label: "balance-rr",
-    hint: "round-robins packets across every link, the only mode that speeds up a single connection — but only reliable on a direct link between two hosts, most switches mishandle it",
-  },
-];
-
-function bondModeLabel(mode: BondMode): string {
-  return BOND_MODE_OPTIONS.find((o) => o.value === mode)?.label ?? mode;
-}
-
 function defaultBondName(index: number): string {
   return `bond${index}`;
-}
-
-// A bond needs 2+ member nics to actually be an interface — fewer than
-// that and it's still being assembled, so it doesn't count yet.
-function validBonds(bonds: BondConfig[]): BondConfig[] {
-  return bonds.filter((b) => b.nicIndices.length >= 2);
-}
-
-interface InterfaceRef {
-  id: string; // "nic-<i>" or "bond-<i>", <i> is the index in nics/bonds
-  label: string;
-}
-
-// Every selectable network interface on a node: each nic not claimed by
-// a (valid) bond, plus each valid bond itself. This is what "management
-// interface" and "bridge" pickers choose from — a bonded nic disappears
-// from the list on its own, since it's part of its bond now, not a
-// standalone interface.
-function interfacesFor(nics: NicInfo[], bonds: BondConfig[]): InterfaceRef[] {
-  const bonded = new Set(validBonds(bonds).flatMap((b) => b.nicIndices));
-  const nicRefs: InterfaceRef[] = nics
-    .map((nic, i) => ({ nic, i }))
-    .filter(({ i }) => !bonded.has(i))
-    .map(({ nic, i }) => ({ id: `nic-${i}`, label: `nic ${i + 1} — ${nic.name} — ${nicSpeedLabel(nic.speed)}` }));
-  const bondRefs: InterfaceRef[] = bonds
-    .map((b, i) => ({ b, i }))
-    .filter(({ b }) => b.nicIndices.length >= 2)
-    .map(({ b, i }) => ({
-      id: `bond-${i}`,
-      label: `${b.name} — ${b.nicIndices.map((idx) => `nic ${idx + 1} (${nics[idx]?.name ?? "?"})`).join(" + ")} (${bondModeLabel(b.mode)})`,
-    }));
-  return [...nicRefs, ...bondRefs];
 }
 
 // Same as interfacesFor, but only the ids — used for resync bookkeeping
@@ -283,17 +203,6 @@ function interfaceIdsFor(nicCount: number, bonds: BondConfig[]): string[] {
     .map((i) => `nic-${i}`);
   const bondIds = usable.map(({ i }) => `bond-${i}`);
   return [...nicIds, ...bondIds];
-}
-
-// a bridge's storage key is "<interfaceId>#<index>" — index 0 is the
-// interface's native/untagged bridge, 1+ are extra vlan-tagged siblings.
-function bridgeKey(interfaceId: string, index: number): string {
-  return `${interfaceId}#${index}`;
-}
-
-function bridgeCountFor(bridgeCounts: Record<string, string>, interfaceId: string): number {
-  const n = parseInt(bridgeCounts[interfaceId] ?? "1", 10);
-  return !Number.isNaN(n) && n >= 1 && n <= 4 ? n : 1;
 }
 
 // every other vlan tag already in use on the same interface's bridges —
@@ -313,51 +222,33 @@ function siblingVlanTagsFor(
   return tags;
 }
 
-interface NodeNetwork {
-  // just the label, e.g. "pve01" — the domain suffix is never stored
-  // per node, only ever read live from the global hostname suffix, so a
-  // node's fqdn can't drift out of sync with the domain you set.
-  hostLabel: string;
-  cidr: string;
-  bondCount: string;
-  bonds: BondConfig[];
-  managementInterfaceId: string;
-  // how many bridges live on each interface id — default "1". only an
-  // interface the visitor has explicitly grown past 1 carries more than
-  // its single native bridge; every id present here has a matching entry
-  // in interfaceIdsFor's output.
-  bridgeCounts: Record<string, string>;
-  // keyed "<interfaceId>#<index>" (see bridgeKey) — index 0 is always
-  // that interface's native/untagged bridge; index 1+ are extra,
-  // vlan-tagged bridges sharing the same underlying nic or bond.
-  bridges: Record<string, BridgeConfig>;
+// a node's names, grouped by the namespace each one actually lands in.
+// they're kept apart rather than pooled, so calling a disk "ceph" and a
+// nic "ceph" is fine — nothing downstream ever confuses the two.
+interface NodeNames {
+  // boot + additional disk friendly names, which become proxmox storage ids.
+  disks: string[];
+  // nic friendly names, bond names and bridge names all become real linux
+  // interface names, and the kernel keeps exactly one namespace for those
+  // — a bond and a bridge really can't both be "vmbr0" — so they're
+  // checked against each other, not separately.
+  interfaces: string[];
 }
 
-interface NodeInfo extends HardwareSpec {
-  name: string;
-  network: NodeNetwork;
+function collectNodeNames(node: NodeInfo): NodeNames {
+  const disks: string[] = [];
+  if (node.bootDiskName) disks.push(node.bootDiskName);
+  for (const d of node.additionalDisks) if (d.name) disks.push(d.name);
+
+  const interfaces: string[] = [];
+  for (const n of node.nics) if (n.name) interfaces.push(n.name);
+  for (const b of node.network.bonds) if (b.name) interfaces.push(b.name);
+  for (const b of Object.values(node.network.bridges)) if (b.name) interfaces.push(b.name);
+
+  return { disks, interfaces };
 }
 
-// every non-empty name field on a node — boot/additional disk friendly
-// names, nic friendly names, bond names, bridge names — flattened into
-// one list for validateUniqueName to check for collisions across all of
-// them at once, not just within each field's own category.
-function collectNodeNames(node: NodeInfo): string[] {
-  const names: string[] = [];
-  if (node.bootDiskName) names.push(node.bootDiskName);
-  for (const d of node.additionalDisks) if (d.name) names.push(d.name);
-  for (const n of node.nics) if (n.name) names.push(n.name);
-  for (const b of node.network.bonds) if (b.name) names.push(b.name);
-  for (const b of Object.values(node.network.bridges)) if (b.name) names.push(b.name);
-  return names;
-}
-
-const nicSpeedOptions = nicSpeedsData as { value: NicSpeed; label: string; hint?: string }[];
 const cpuVendorOptions = cpuVendorsData as { value: CpuVendor; label: string }[];
-
-function nicSpeedLabel(speed: NicSpeed): string {
-  return nicSpeedOptions.find((o) => o.value === speed)?.label ?? speed;
-}
 
 interface CpuFamily {
   name: string;
@@ -530,6 +421,16 @@ function validateHostCidr(value: string): string | null {
   return null;
 }
 
+// for a bridge that's a pure vm/ct switch — the host itself never gets an
+// address here, but the visitor should still commit to a subnet up front
+// so vm/ct addressing has something to follow later. unlike
+// validateHostCidr, the network's own address (10.0.20.0/24) IS the
+// correct value here, not a mistake to flag.
+function validateNetwork(value: string): string | null {
+  if (!value) return "pick the subnet this bridge's vms/cts should use";
+  return validateCidr(value);
+}
+
 function validateHostnameSuffix(value: string): string | null {
   if (!value) return null;
   if (!/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$/i.test(value)) {
@@ -575,14 +476,13 @@ function validateFriendlyName(value: string): string | null {
   return null;
 }
 
-// every name on a node — disk/nic friendly names, bond names, bridge
-// names — shares one namespace: none of them should collide with any
-// other, disk with nic, bond with bridge, or otherwise. a straight count
-// across the combined list (rather than tracking each field's own
-// identity) flags every field with a colliding value symmetrically.
-function validateUniqueName(value: string, allNames: string[]): string | null {
+// checked against the other names in the SAME namespace only (see
+// NodeNames) — a disk and a nic can happily share a name. a straight
+// count across that list, rather than tracking each field's own identity,
+// flags every field holding the colliding value symmetrically.
+function validateUniqueName(value: string, sameKindNames: string[]): string | null {
   if (!value) return null;
-  return allNames.filter((n) => n === value).length > 1
+  return sameKindNames.filter((n) => n === value).length > 1
     ? "used more than once on this node — names must be unique"
     : null;
 }
@@ -607,6 +507,18 @@ function validateVlanTag(value: string, siblingTags: string[]): string | null {
   return null;
 }
 
+// unlike a bridge's own vlan tag, the homelab's main vlan is purely
+// informational — most flat single-vlan homelabs don't number their
+// "main" network at all, so empty is a perfectly normal answer, not an
+// error to fix.
+function validateOptionalVlanTag(value: string): string | null {
+  if (!value) return null;
+  if (!/^\d+$/.test(value)) return "whole numbers only";
+  const n = Number(value);
+  if (n < 1 || n > 4094) return "must be between 1 and 4094";
+  return null;
+}
+
 // A text field for anything in ip or ip/prefix notation, with a small
 // toggle beside the input that expands a subnet breakdown (network,
 // broadcast, usable range, host count) — collapsed by default so it
@@ -614,6 +526,7 @@ function validateVlanTag(value: string, siblingTags: string[]): string | null {
 function CidrField({
   id,
   label,
+  usedFor,
   value,
   onChange,
   hint,
@@ -624,6 +537,13 @@ function CidrField({
 }: {
   id: string;
   label: string;
+  // a small sub-headline under the label — what this bridge is actually
+  // for (e.g. "ceph / storage traffic, backups"). NetworkAddressFields'
+  // per-node address fields are often the only place a bridge shows up
+  // once "identical network setup" moves its purpose checkboxes into the
+  // shared section, so a field like "vmbr3 — static ip for this node"
+  // otherwise gives no clue what vmbr3 even is without scrolling back up.
+  usedFor?: string;
   value: string;
   onChange: (value: string) => void;
   hint: string;
@@ -658,6 +578,7 @@ function CidrField({
         {label}
         {required && <span className="pc-field__required"> *</span>}
       </label>
+      {usedFor && <p className="meta pc-field__usedfor">used for: {usedFor}</p>}
       <div className="pc-field__control">
         <span className="code pc-field__bracket">#</span>
         <input
@@ -905,10 +826,11 @@ function buildPlaceholderTable(nodes: NodeInfo[], globalCidr: string): Map<strin
       if (!bridge || !bridge.enabled || bridge.ip) return;
       const reference = referenceNetworkForBridge(nodes, key, prefix);
       if (reference) {
-        // a "network (optional)" field never shows a host suggestion, so
-        // only reserve one when this bridge actually needs a real address
-        // — otherwise it'd burn a host no field displays, pushing every
-        // later bridge's suggestion further out than it needs to be.
+        // a pure vm/ct switch's "network" field never shows a host
+        // suggestion, so only reserve one when this bridge actually needs
+        // a real address — otherwise it'd burn a host no field displays,
+        // pushing every later bridge's suggestion further out than it
+        // needs to be.
         const needsHost = needsHostIpForPurposes(bridge.purposes, bridge.otherNeedsHostIp);
         const host = needsHost ? nextFreeHostInNetwork(reference, reservedByNetwork.get(reference) ?? new Set<string>()) : "";
         if (needsHost) reserve(reference, host);
@@ -954,6 +876,12 @@ interface AddressClaim {
   label: string;
   ip: string;
   range: { start: number; end: number };
+  // false for a pure vm/ct bridge's declared network — under "identical
+  // network setup" that value is deliberately the same on every node (see
+  // applyNetworkStructure), so matching another node's claim there is
+  // expected, not a conflict. true for anything the host itself actually
+  // binds to: the management ip, or any bridge whose purpose needs one.
+  isReal: boolean;
 }
 
 // every real (non-empty, valid) address claim across the whole cluster —
@@ -964,19 +892,26 @@ function collectAddressClaims(nodes: NodeInfo[]): AddressClaim[] {
   nodes.forEach((n, nodeIndex) => {
     const [mgmtIp] = n.network.cidr.split("/");
     const mgmtRange = cidrRange(n.network.cidr);
-    if (mgmtIp && mgmtRange) claims.push({ nodeIndex, key: "mgmt", label: "static ip", ip: mgmtIp, range: mgmtRange });
+    if (mgmtIp && mgmtRange) claims.push({ nodeIndex, key: "mgmt", label: "static ip", ip: mgmtIp, range: mgmtRange, isReal: true });
     for (const [key, bridge] of Object.entries(n.network.bridges)) {
       const [ip] = bridge.ip.split("/");
       const range = cidrRange(bridge.ip);
-      if (ip && range) claims.push({ nodeIndex, key, label: bridge.name, ip, range });
+      if (ip && range) {
+        const isReal = needsHostIpForPurposes(bridge.purposes, bridge.otherNeedsHostIp);
+        claims.push({ nodeIndex, key, label: bridge.name, ip, range, isReal });
+      }
     }
   });
   return claims;
 }
 
 // flags two kinds of real (not placeholder) address problems:
-//  1. the exact same address claimed twice, anywhere in the cluster — two
-//     interfaces can never share one host ip, full stop.
+//  1. the exact same address claimed twice by two REAL per-node addresses,
+//     anywhere in the cluster — two interfaces can never share one host
+//     ip, full stop. a shared, non-real vm/ct network matching itself
+//     across nodes is expected (see AddressClaim.isReal) and skipped here
+//     — but still flagged same-node, since two of one node's own bridges
+//     genuinely can't both sit on the same network.
 //  2. two of the SAME node's own claims whose ranges overlap — one sitting
 //     inside the other's declared network, say — because a single node
 //     can't cleanly route between two interfaces both claiming the same
@@ -996,14 +931,21 @@ function buildAddressConflicts(nodes: NodeInfo[]): Map<string, string> {
       const b = claims[j];
       if (a.ip === b.ip) {
         const onOtherNode = a.nodeIndex !== b.nodeIndex;
-        setIfAbsent(
-          `${a.nodeIndex}#${a.key}`,
-          `same address as ${b.label}${onOtherNode ? ` on ${nodeLabel(b.nodeIndex)}` : ""} — every interface needs its own`,
-        );
-        setIfAbsent(
-          `${b.nodeIndex}#${b.key}`,
-          `same address as ${a.label}${onOtherNode ? ` on ${nodeLabel(a.nodeIndex)}` : ""} — every interface needs its own`,
-        );
+        // a non-real (network-only) claim never actually binds to
+        // anything, so it landing on the same address as another node's
+        // claim is no conflict — cross-node, only two REAL addresses
+        // colliding is. same-node matches still always count: two of one
+        // node's own bridges shouldn't numerically collide either way.
+        if (!onOtherNode || (a.isReal && b.isReal)) {
+          setIfAbsent(
+            `${a.nodeIndex}#${a.key}`,
+            `same address as ${b.label}${onOtherNode ? ` on ${nodeLabel(b.nodeIndex)}` : ""} — every interface needs its own`,
+          );
+          setIfAbsent(
+            `${b.nodeIndex}#${b.key}`,
+            `same address as ${a.label}${onOtherNode ? ` on ${nodeLabel(a.nodeIndex)}` : ""} — every interface needs its own`,
+          );
+        }
         continue;
       }
       if (a.nodeIndex !== b.nodeIndex) continue;
@@ -1107,11 +1049,16 @@ function resyncNetworkForNics(
   };
 }
 
-// copies just the *structural* shape of one node's network onto every
-// node — bond composition/mode/names, which interface is management, and
-// each bridge's purposes/enabled/name/otherNeedsHostIp. hostLabel, cidr
-// and every bridge's own ip are never touched here; those stay unique per
-// node even when "identical network setup" is on.
+// copies the *structural* shape of one node's network onto every node —
+// bond composition/mode/names, which interface is management, and each
+// bridge's purposes/enabled/name/otherNeedsHostIp/vlanTag. hostLabel and
+// cidr are never touched here; those stay unique per node even when
+// "identical network setup" is on. a bridge's ip splits in two: a real
+// per-node static ip (any purpose that needs a host address) stays this
+// node's own, but a pure vm/ct bridge's declared subnet is itself part of
+// the shared structure — no node claims an address on it, so there's
+// nothing that needs to stay unique, and copying it saves re-typing the
+// same subnet once per node.
 function applyNetworkStructure(nodes: NodeInfo[], template: NodeNetwork): NodeInfo[] {
   return nodes.map((node) => {
     const resynced = resyncNetworkForNics(node.network, node.nics.length, {
@@ -1127,18 +1074,24 @@ function applyNetworkStructure(nodes: NodeInfo[], template: NodeNetwork): NodeIn
     const bridges = Object.fromEntries(
       Object.entries(defaultBridgesForIds(ids, resynced.managementInterfaceId, bridgeCounts)).map(([key, bridge]) => {
         const t = template.bridges[key];
+        if (!t) return [key, bridge];
+        const needsHost = needsHostIpForPurposes(t.purposes, t.otherNeedsHostIp);
+        // resyncNetworkForNics rebuilds bridges from scratch (same as
+        // every other structural change in this wizard), so this node's
+        // own prior value has to be read from its pre-resync bridges,
+        // not from `bridge` above — that's already a blank default.
+        const ip = needsHost ? (node.network.bridges[key]?.ip ?? "") : t.ip;
         return [
           key,
-          t
-            ? {
-                ...bridge,
-                purposes: [...t.purposes],
-                enabled: t.enabled,
-                name: t.name,
-                otherNeedsHostIp: t.otherNeedsHostIp,
-                vlanTag: t.vlanTag,
-              }
-            : bridge,
+          {
+            ...bridge,
+            purposes: [...t.purposes],
+            enabled: t.enabled,
+            name: t.name,
+            otherNeedsHostIp: t.otherNeedsHostIp,
+            vlanTag: t.vlanTag,
+            ip,
+          },
         ];
       }),
     );
@@ -1270,6 +1223,15 @@ function purposeComboHint(purposes: InterfacePurpose[]): Hint | null {
   return null;
 }
 
+// ceph and zfs replication want a bond entirely to themselves — the same
+// reasoning purposeComboHint already warns about for a single shared
+// bridge, just enforced structurally: a bond assigned to either forbids
+// splitting it into extra vlan-tagged bridges at all, rather than merely
+// warning once one's added.
+function isDedicatedStorageBondPurpose(purposes: InterfacePurpose[]): boolean {
+  return purposes.includes("ceph") || purposes.includes("zfs");
+}
+
 function bridgesWithPurpose(bridges: Record<string, BridgeConfig>, purpose: InterfacePurpose): boolean {
   return Object.values(bridges).some((b) => b.enabled && b.purposes.includes(purpose));
 }
@@ -1365,7 +1327,7 @@ function DiskTypeRadioGroup({
 function HardwareFields({
   keyPrefix,
   values,
-  allNames,
+  names,
   onChange,
   onNicCountChange,
   onNicChange,
@@ -1374,10 +1336,10 @@ function HardwareFields({
 }: {
   keyPrefix: string;
   values: HardwareSpec;
-  // every name already in use on this node (disks, nics, bonds, bridges)
-  // — including this node's own current values — so a field can tell
-  // whether ITS value collides with anything else, itself included.
-  allNames: string[];
+  // the names already in use on this node, per namespace — including this
+  // node's own current values, so a field can tell whether ITS value
+  // collides with another of the same kind, itself included.
+  names: NodeNames;
   onChange: (patch: Partial<HardwareSpec>) => void;
   onNicCountChange: (value: string) => void;
   onNicChange: (nicIndex: number, patch: Partial<NicInfo>) => void;
@@ -1389,9 +1351,9 @@ function HardwareFields({
   const coresPerCpuError = validateIntRange(values.coresPerCpu, 1, 256, { required: true });
   const ramGbError = validateIntRange(values.ramGb, 1, 16384, { required: true });
   const bootDiskSizeError = validateIntRange(values.bootDiskSizeGb, 8, 1048576, { required: true });
-  const bootDiskNameError = validateFriendlyName(values.bootDiskName) ?? validateUniqueName(values.bootDiskName, allNames);
+  const bootDiskNameError = validateFriendlyName(values.bootDiskName) ?? validateUniqueName(values.bootDiskName, names.disks);
   const additionalDiskCountError = validateIntRange(values.additionalDiskCount, 0, 12);
-  const nicCountError = validateIntRange(values.nicCount, 1, 8, { required: true });
+  const nicCountError = validateIntRange(values.nicCount, 1, MAX_NICS_PER_NODE, { required: true });
   // bootDiskSizeGb and each additional disk's sizeGb start out empty and
   // are now required — flagging that red before the visitor has typed
   // anything would repeat the same "already wrong" confusion CidrField
@@ -1595,7 +1557,7 @@ function HardwareFields({
       {values.additionalDisks.map((disk, j) => {
         const diskSizeError = validateIntRange(disk.sizeGb, 1, 1048576, { required: true });
         const showDiskSizeError = sizeTouched[`disk-${j}`] && diskSizeError;
-        const diskNameError = validateFriendlyName(disk.name) ?? validateUniqueName(disk.name, allNames);
+        const diskNameError = validateFriendlyName(disk.name) ?? validateUniqueName(disk.name, names.disks);
         return (
           <div key={j} className="flex flex-col" style={{ gap: "var(--space-3)" }}>
             <p className="label text-ink-muted">additional disk {j + 1}</p>
@@ -1666,7 +1628,7 @@ function HardwareFields({
             className="pc-field__input code"
             type="number"
             min={1}
-            max={8}
+            max={MAX_NICS_PER_NODE}
             value={values.nicCount}
             onChange={(e) => onNicCountChange(e.target.value)}
           />
@@ -1680,7 +1642,7 @@ function HardwareFields({
         // kind of label that ends up as a real `ip link` rename or a
         // udev .link Name= — so it's held to the actual linux ifname
         // limit, not the looser storage-id one.
-        const nicNameError = validateInterfaceName(nic.name) ?? validateUniqueName(nic.name, allNames);
+        const nicNameError = validateInterfaceName(nic.name) ?? validateUniqueName(nic.name, names.interfaces);
         return (
           <div key={j} className="flex flex-col" style={{ gap: "var(--space-3)" }}>
             <p className="label text-ink-muted">nic {j + 1}</p>
@@ -1741,25 +1703,28 @@ function HardwareFields({
 function BondFields({
   keyPrefix,
   node,
+  maxBonds,
   onBondCountChange,
   onToggleBondNic,
   onUpdateBondMeta,
 }: {
   keyPrefix: string;
   node: NodeInfo;
+  // capped by the cluster's least-equipped node, not this node's own nic
+  // count — see maxBondsForCluster.
+  maxBonds: number;
   onBondCountChange: (value: string) => void;
   onToggleBondNic: (bondIndex: number, nicIndex: number, checked: boolean) => void;
-  onUpdateBondMeta: (bondIndex: number, patch: Partial<Pick<BondConfig, "name" | "mode">>) => void;
+  onUpdateBondMeta: (bondIndex: number, patch: Partial<Pick<BondConfig, "name" | "mode" | "vlanTag">>) => void;
 }) {
-  const bondCountError = validateIntRange(node.network.bondCount, 0, 4, { required: true });
-  const allNames = collectNodeNames(node);
+  const bondCountError = validateIntRange(node.network.bondCount, 0, maxBonds);
+  const names = collectNodeNames(node);
 
   return (
     <>
       <div className={`pc-field ${bondCountError ? "pc-field--error" : ""}`}>
         <label className="label pc-field__label" htmlFor={`bondcount-${keyPrefix}`}>
           number of bonds
-          <span className="pc-field__required"> *</span>
         </label>
         <div className="pc-field__control">
           <input
@@ -1767,9 +1732,12 @@ function BondFields({
             className="pc-field__input code"
             type="number"
             min={0}
-            max={4}
+            max={maxBonds}
             value={node.network.bondCount}
             onChange={(e) => onBondCountChange(e.target.value)}
+            onBlur={() => {
+              if (!node.network.bondCount) onBondCountChange("0");
+            }}
           />
         </div>
         <span className="body-sm pc-field__hint">
@@ -1779,7 +1747,8 @@ function BondFields({
       </div>
 
       {node.network.bonds.map((bond, bi) => {
-        const bondNameError = validateInterfaceName(bond.name) ?? validateUniqueName(bond.name, allNames);
+        const bondNameError = validateInterfaceName(bond.name) ?? validateUniqueName(bond.name, names.interfaces);
+        const bondVlanError = validateOptionalVlanTag(bond.vlanTag);
         return (
         <div
           key={bi}
@@ -1850,6 +1819,29 @@ function BondFields({
               {bondNameError ?? "the linux bonding interface name — appears below as its own interface"}
             </span>
           </div>
+
+          <div className={`pc-field ${bondVlanError ? "pc-field--error" : ""}`}>
+            <label className="label pc-field__label" htmlFor={`bondvlan-${keyPrefix}-${bi}`}>
+              vlan tag
+            </label>
+            <div className="pc-field__control">
+              <span className="code pc-field__bracket">#</span>
+              <input
+                id={`bondvlan-${keyPrefix}-${bi}`}
+                className="pc-field__input code"
+                type="number"
+                min={1}
+                max={4094}
+                placeholder="e.g. 30"
+                value={bond.vlanTag}
+                onChange={(e) => onUpdateBondMeta(bi, { vlanTag: e.target.value })}
+              />
+            </div>
+            <span className="body-sm pc-field__hint">
+              {bondVlanError ??
+                "only if this bond's own native link rides a numbered vlan — overrides the main homelab vlan for this bond, leave blank otherwise"}
+            </span>
+          </div>
         </div>
         );
       })}
@@ -1871,7 +1863,7 @@ function ExtraBridgeCard({
   heading,
   bridge,
   siblingVlanTags,
-  allNames,
+  names,
   purposeOptions,
   storagePurpose,
   storagePurposeMissingHint,
@@ -1884,7 +1876,7 @@ function ExtraBridgeCard({
   heading: string;
   bridge: BridgeConfig;
   siblingVlanTags: string[];
-  allNames: string[];
+  names: NodeNames;
   purposeOptions: PurposeInfo[];
   storagePurpose: InterfacePurpose | null;
   storagePurposeMissingHint: ReactNode;
@@ -1895,11 +1887,11 @@ function ExtraBridgeCard({
   // check yet.
   conflictError?: string | null;
 }) {
-  const bridgeNameError = validateInterfaceName(bridge.name) ?? validateUniqueName(bridge.name, allNames);
+  const bridgeNameError = validateInterfaceName(bridge.name) ?? validateUniqueName(bridge.name, names.interfaces);
   const comboHint = purposeComboHint(bridge.purposes);
   const vlanError = validateVlanTag(bridge.vlanTag, siblingVlanTags);
   const needsHostIp = needsHostIpForPurposes(bridge.purposes, bridge.otherNeedsHostIp);
-  const ipError = (needsHostIp ? validateHostCidr(bridge.ip) : validateCidr(bridge.ip)) ?? conflictError ?? null;
+  const ipError = (needsHostIp ? validateHostCidr(bridge.ip) : validateNetwork(bridge.ip)) ?? conflictError ?? null;
   // the vlan tag starts empty on a freshly-added extra bridge — same
   // "don't flag it red before the visitor has touched it" reasoning as
   // CidrField and the disk-size fields in HardwareFields.
@@ -2022,7 +2014,8 @@ function ExtraBridgeCard({
       {address && (
         <CidrField
           id={`bridgeip-${keyPrefix}-${bridgeId}`}
-          label={needsHostIp ? "static ip for this node" : "network (optional)"}
+          label={needsHostIp ? "static ip for this node" : "network"}
+          usedFor={purposesUsedForLabel(bridge.purposes)}
           value={bridge.ip}
           onChange={(value) => onBridgeChange(bridgeId, { ip: value })}
           placeholder={
@@ -2034,10 +2027,10 @@ function ExtraBridgeCard({
           hint={
             needsHostIp
               ? requiredIpHintFor(bridge.purposes, bridge.otherNeedsHostIp)
-              : "the subnet vms/cts on this bridge should use — purely informational, the host won't have an address here"
+              : "the subnet vms/cts on this bridge should use — the host itself still won't have an address here"
           }
           defaultPrefix={address.lanPrefix}
-          required={needsHostIp}
+          required
         />
       )}
     </div>
@@ -2058,7 +2051,7 @@ function BridgeCountField({
   count: string;
   onBridgeCountChange: (interfaceId: string, value: string) => void;
 }) {
-  const error = validateIntRange(count, 1, 4, { required: true });
+  const error = validateIntRange(count, 1, MAX_BRIDGES_PER_INTERFACE, { required: true });
   return (
     <div className={`pc-field ${error ? "pc-field--error" : ""}`}>
       <label className="label pc-field__label" htmlFor={`bridgecount-${keyPrefix}-${interfaceId}`}>
@@ -2071,7 +2064,7 @@ function BridgeCountField({
           className="pc-field__input code"
           type="number"
           min={1}
-          max={4}
+          max={MAX_BRIDGES_PER_INTERFACE}
           value={count}
           onChange={(e) => onBridgeCountChange(interfaceId, e.target.value)}
         />
@@ -2093,8 +2086,12 @@ function NetworkStructureFields({
   keyPrefix,
   node,
   nodeCount,
+  maxBonds,
   storageHaMode,
   storagePurpose,
+  globalCidr,
+  lanPrefix,
+  placeholders,
   onBondCountChange,
   onToggleBondNic,
   onUpdateBondMeta,
@@ -2105,22 +2102,33 @@ function NetworkStructureFields({
   keyPrefix: string;
   node: NodeInfo;
   nodeCount: number;
+  maxBonds: number;
   storageHaMode: StorageHaMode;
   storagePurpose: InterfacePurpose | null;
+  // used only for a pure vm/ct bridge's declared network — the one bridge
+  // field that lives here rather than in NetworkAddressFields, since it's
+  // shared structure now, not a per-node address (see applyNetworkStructure).
+  globalCidr: string;
+  lanPrefix: number;
+  placeholders: Map<string, PlaceholderSubnet>;
   onBondCountChange: (value: string) => void;
   onToggleBondNic: (bondIndex: number, nicIndex: number, checked: boolean) => void;
-  onUpdateBondMeta: (bondIndex: number, patch: Partial<Pick<BondConfig, "name" | "mode">>) => void;
+  onUpdateBondMeta: (bondIndex: number, patch: Partial<Pick<BondConfig, "name" | "mode" | "vlanTag">>) => void;
   onManagementInterfaceChange: (interfaceId: string) => void;
   onBridgeChange: (bridgeId: string, patch: Partial<BridgeConfig>) => void;
   onBridgeCountChange: (interfaceId: string, value: string) => void;
 }) {
   const interfaces = interfacesFor(node.nics, node.network.bonds);
-  const allNames = collectNodeNames(node);
+  const names = collectNodeNames(node);
+  // NetworkStructureFields only ever renders the "all nodes" template —
+  // the real per-node instances go through NetworkFields instead — so
+  // every placeholder lookup below is pinned to node index 0.
+  const addressKeys = addressableBridgeKeys(node);
   const mgmtBridgeKey = bridgeKey(node.network.managementInterfaceId, 0);
   const managementBridge = node.network.bridges[mgmtBridgeKey];
   const managementBridgeNameError =
     validateInterfaceName(managementBridge?.name || "vmbr0") ??
-    validateUniqueName(managementBridge?.name || "vmbr0", allNames);
+    validateUniqueName(managementBridge?.name || "vmbr0", names.interfaces);
   const purposeOptions = INTERFACE_PURPOSE_OPTIONS.filter(
     (opt) => (opt.value !== "ceph" && opt.value !== "zfs") || opt.value === storagePurpose,
   );
@@ -2144,6 +2152,7 @@ function NetworkStructureFields({
       <BondFields
         keyPrefix={keyPrefix}
         node={node}
+        maxBonds={maxBonds}
         onBondCountChange={onBondCountChange}
         onToggleBondNic={onToggleBondNic}
         onUpdateBondMeta={onUpdateBondMeta}
@@ -2240,18 +2249,23 @@ function NetworkStructureFields({
         const isManagement = iface.id === node.network.managementInterfaceId;
         const count = bridgeCountFor(node.network.bridgeCounts, iface.id);
         const bridge = node.network.bridges[bridgeKey(iface.id, 0)];
+        // ceph/zfs get the whole bond — no extra vlan-tagged bridges to
+        // split its bandwidth or latency budget with anything else.
+        const isDedicatedStorageBond = iface.id.startsWith("bond-") && isDedicatedStorageBondPurpose(bridge?.purposes ?? []);
 
         return (
-          <div key={iface.id} className="flex flex-col" style={{ gap: "var(--space-3)" }}>
+          <div key={iface.id} className="flex flex-col border border-border bg-surface-100 p-5" style={{ gap: "var(--space-3)" }}>
+            <p className="label text-ink-muted">{iface.label}</p>
+
             {!isManagement &&
               bridge &&
               (() => {
-                const bridgeNameError = validateInterfaceName(bridge.name) ?? validateUniqueName(bridge.name, allNames);
+                const bridgeNameError = validateInterfaceName(bridge.name) ?? validateUniqueName(bridge.name, names.interfaces);
                 const comboHint = purposeComboHint(bridge.purposes);
                 const key0 = bridgeKey(iface.id, 0);
+                const needsHostIp = needsHostIpForPurposes(bridge.purposes, bridge.otherNeedsHostIp);
                 return (
-                  <div className="flex flex-col border border-border bg-surface-100 p-5" style={{ gap: "var(--space-3)" }}>
-                    <p className="label text-ink-muted">{iface.label}</p>
+                  <>
                     <label className="pc-checkbox">
                       <input
                         type="checkbox"
@@ -2352,39 +2366,89 @@ function NetworkStructureFields({
                             {bridgeNameError ?? "shown in the proxmox ui and used in vm/ct network config"}
                           </span>
                         </div>
+
+                        {/* a real per-node static ip stays out of this
+                            shared block entirely — NetworkAddressFields
+                            handles it, once per node. a pure vm/ct
+                            bridge's network is the one address-shaped
+                            field that genuinely belongs here: it's the
+                            same value on every node, so it's configured
+                            once, right alongside this bridge's purpose. */}
+                        {!needsHostIp && (
+                          <CidrField
+                            id={`bridgeip-${keyPrefix}-${key0}`}
+                            label="network"
+                            usedFor={purposesUsedForLabel(bridge.purposes)}
+                            value={bridge.ip}
+                            onChange={(value) => onBridgeChange(key0, { ip: value })}
+                            placeholder={(() => {
+                              const subnet =
+                                placeholders.get(`0#${key0}`) ??
+                                nonCollidingPlaceholderSubnet(node, globalCidr, addressKeys.indexOf(key0), 0);
+                              return subnet?.network ?? "10.0.20.0/24";
+                            })()}
+                            error={validateNetwork(bridge.ip)}
+                            hint="the subnet vms/cts on this bridge should use — the host itself still won't have an address here, and it's shared across every node"
+                            defaultPrefix={lanPrefix}
+                            required
+                          />
+                        )}
                       </>
                     )}
-                  </div>
+                  </>
                 );
               })()}
 
-            <BridgeCountField
-              keyPrefix={keyPrefix}
-              interfaceId={iface.id}
-              count={node.network.bridgeCounts[iface.id] ?? "1"}
-              onBridgeCountChange={onBridgeCountChange}
-            />
-
-            {Array.from({ length: Math.max(0, count - 1) }, (_, k) => k + 1).map((index) => {
-              const extraKey = bridgeKey(iface.id, index);
-              const extraBridge = node.network.bridges[extraKey];
-              if (!extraBridge) return null;
-              return (
-                <ExtraBridgeCard
-                  key={extraKey}
+            {isDedicatedStorageBond ? (
+              <p className="body-sm pc-field__hint">
+                bridges on this interface — locked to 1: {bridge?.purposes.includes("ceph") ? "ceph" : "zfs replication"} gets this
+                bond to itself, so it can&apos;t be split into extra vlan-tagged bridges for anything else.
+              </p>
+            ) : (
+              <>
+                <BridgeCountField
                   keyPrefix={keyPrefix}
-                  bridgeId={extraKey}
-                  heading={`${iface.label} — extra bridge (${extraBridge.name})`}
-                  bridge={extraBridge}
-                  siblingVlanTags={siblingVlanTagsFor(node.network.bridges, count, iface.id, index)}
-                  allNames={allNames}
-                  purposeOptions={purposeOptions}
-                  storagePurpose={storagePurpose}
-                  storagePurposeMissingHint={storagePurposeMissingHint}
-                  onBridgeChange={onBridgeChange}
+                  interfaceId={iface.id}
+                  count={node.network.bridgeCounts[iface.id] ?? "1"}
+                  onBridgeCountChange={onBridgeCountChange}
                 />
-              );
-            })}
+
+                {Array.from({ length: Math.max(0, count - 1) }, (_, k) => k + 1).map((index) => {
+                  const extraKey = bridgeKey(iface.id, index);
+                  const extraBridge = node.network.bridges[extraKey];
+                  if (!extraBridge) return null;
+                  const extraNeedsHostIp = needsHostIpForPurposes(extraBridge.purposes, extraBridge.otherNeedsHostIp);
+                  return (
+                    <ExtraBridgeCard
+                      key={extraKey}
+                      keyPrefix={keyPrefix}
+                      bridgeId={extraKey}
+                      heading={`extra bridge (${extraBridge.name})`}
+                      bridge={extraBridge}
+                      siblingVlanTags={siblingVlanTagsFor(node.network.bridges, count, iface.id, index)}
+                      names={names}
+                      purposeOptions={purposeOptions}
+                      storagePurpose={storagePurpose}
+                      storagePurposeMissingHint={storagePurposeMissingHint}
+                      onBridgeChange={onBridgeChange}
+                      // same split as the first bridge above — a real static
+                      // ip is per-node (NetworkAddressFields), a network-only
+                      // value is shared, so only that case renders here.
+                      address={
+                        extraNeedsHostIp
+                          ? undefined
+                          : {
+                              lanPrefix,
+                              secondarySubnet:
+                                placeholders.get(`0#${extraKey}`) ??
+                                nonCollidingPlaceholderSubnet(node, globalCidr, addressKeys.indexOf(extraKey), 0),
+                            }
+                      }
+                    />
+                  );
+                })}
+              </>
+            )}
           </div>
         );
       })}
@@ -2404,9 +2468,10 @@ function NetworkStructureFields({
 }
 
 // the part of a node's network that MUST stay unique even when "identical
-// network setup" is on: hostname, the management ip, and each enabled
-// bridge's own ip. rendered per node always — NetworkStructureFields
-// covers everything else.
+// network setup" is on: hostname, the management ip, and any bridge whose
+// purpose needs a real per-node address. a pure vm/ct bridge's network
+// isn't unique at all under "identical network setup" — it's configured
+// once in NetworkStructureFields instead, so it's skipped here.
 function NetworkAddressFields({
   keyPrefix,
   node,
@@ -2441,7 +2506,8 @@ function NetworkAddressFields({
   const hostLabelError = validateHostLabel(node.network.hostLabel);
   const cidrError = validateCidr(node.network.cidr) ?? conflicts.get(`${nodeIndex}#mgmt`) ?? null;
   const mgmtBridgeKey = bridgeKey(node.network.managementInterfaceId, 0);
-  const managementBridgeName = node.network.bridges[mgmtBridgeKey]?.name || "vmbr0";
+  const managementBridge = node.network.bridges[mgmtBridgeKey];
+  const managementBridgeName = managementBridge?.name || "vmbr0";
   const managementCidrPlaceholder = deriveNodeCidr(globalCidr, nodeIndex) || "10.0.10.11/24";
   // every bridge except the management interface's own index-0 bridge —
   // that one's address is the "static ip" field above, not a field here.
@@ -2475,6 +2541,7 @@ function NetworkAddressFields({
       <CidrField
         id={`nodecidr-${keyPrefix}`}
         label="static ip"
+        usedFor={["management", ...(managementBridge?.purposes.map((p) => purposeInfoFor(p).label) ?? [])].join(", ")}
         value={node.network.cidr}
         onChange={(value) => onChange({ cidr: value })}
         placeholder={managementCidrPlaceholder}
@@ -2487,25 +2554,27 @@ function NetworkAddressFields({
         const bridge = node.network.bridges[key];
         if (!bridge || !bridge.enabled) return null;
         const needsHostIp = needsHostIpForPurposes(bridge.purposes, bridge.otherNeedsHostIp);
-        const ipError =
-          (needsHostIp ? validateHostCidr(bridge.ip) : validateCidr(bridge.ip)) ?? conflicts.get(`${nodeIndex}#${key}`) ?? null;
+        // NetworkAddressFields only ever renders under "identical network
+        // setup" (its one caller), where a pure vm/ct bridge's network is
+        // shared, shown once in NetworkStructureFields instead — showing
+        // it again here, per node, would just invite re-typing the same
+        // subnet on every node, or worse, drifting them apart.
+        if (!needsHostIp) return null;
+        const ipError = validateHostCidr(bridge.ip) ?? conflicts.get(`${nodeIndex}#${key}`) ?? null;
         const subnet = placeholders.get(`${nodeIndex}#${key}`) ?? nonCollidingPlaceholderSubnet(node, globalCidr, position, nodeIndex);
         return (
           <CidrField
             key={key}
             id={`bridgeip-${keyPrefix}-${key}`}
-            label={`${bridge.name} — ${needsHostIp ? "static ip for this node" : "network (optional)"}`}
+            label={`${bridge.name} — static ip for this node`}
+            usedFor={purposesUsedForLabel(bridge.purposes)}
             value={bridge.ip}
             onChange={(value) => onBridgeChange(key, { ip: value })}
-            placeholder={needsHostIp ? (subnet?.host ?? "10.0.20.11/24") : (subnet?.network ?? "10.0.20.0/24")}
+            placeholder={subnet?.host ?? "10.0.20.11/24"}
             error={ipError}
-            hint={
-              needsHostIp
-                ? requiredIpHintFor(bridge.purposes, bridge.otherNeedsHostIp)
-                : "the subnet vms/cts on this bridge should use — purely informational, the host won't have an address here"
-            }
+            hint={requiredIpHintFor(bridge.purposes, bridge.otherNeedsHostIp)}
             defaultPrefix={lanPrefix}
-            required={needsHostIp}
+            required
           />
         );
       })}
@@ -2521,6 +2590,7 @@ function NetworkFields({
   lanPrefix,
   globalCidr,
   nodeCount,
+  maxBonds,
   storageHaMode,
   storagePurpose,
   placeholders,
@@ -2548,6 +2618,7 @@ function NetworkFields({
   // drives the corosync warning below (only a cluster of 2+ has corosync
   // to worry about).
   nodeCount: number;
+  maxBonds: number;
   // the visitor's raw choice above, before any disk-availability fallback
   // — only used to word the "why isn't ceph/zfs offered" hint correctly.
   storageHaMode: StorageHaMode;
@@ -2566,7 +2637,7 @@ function NetworkFields({
   onChange: (patch: Partial<NodeNetwork>) => void;
   onBondCountChange: (value: string) => void;
   onToggleBondNic: (bondIndex: number, nicIndex: number, checked: boolean) => void;
-  onUpdateBondMeta: (bondIndex: number, patch: Partial<Pick<BondConfig, "name" | "mode">>) => void;
+  onUpdateBondMeta: (bondIndex: number, patch: Partial<Pick<BondConfig, "name" | "mode" | "vlanTag">>) => void;
   onManagementInterfaceChange: (interfaceId: string) => void;
   onBridgeChange: (bridgeId: string, patch: Partial<BridgeConfig>) => void;
   onBridgeCountChange: (interfaceId: string, value: string) => void;
@@ -2574,12 +2645,12 @@ function NetworkFields({
   const hostLabelError = validateHostLabel(node.network.hostLabel);
   const cidrError = validateCidr(node.network.cidr) ?? conflicts.get(`${nodeIndex}#mgmt`) ?? null;
   const interfaces = interfacesFor(node.nics, node.network.bonds);
-  const allNames = collectNodeNames(node);
+  const names = collectNodeNames(node);
   const mgmtBridgeKey = bridgeKey(node.network.managementInterfaceId, 0);
   const managementBridge = node.network.bridges[mgmtBridgeKey];
   const managementBridgeName = managementBridge?.name || "vmbr0";
   const managementBridgeNameError =
-    validateInterfaceName(managementBridgeName) ?? validateUniqueName(managementBridgeName, allNames);
+    validateInterfaceName(managementBridgeName) ?? validateUniqueName(managementBridgeName, names.interfaces);
   const purposeOptions = INTERFACE_PURPOSE_OPTIONS.filter(
     (opt) => (opt.value !== "ceph" && opt.value !== "zfs") || opt.value === storagePurpose,
   );
@@ -2628,6 +2699,7 @@ function NetworkFields({
       <BondFields
         keyPrefix={keyPrefix}
         node={node}
+        maxBonds={maxBonds}
         onBondCountChange={onBondCountChange}
         onToggleBondNic={onToggleBondNic}
         onUpdateBondMeta={onUpdateBondMeta}
@@ -2638,6 +2710,7 @@ function NetworkFields({
         <CidrField
           id={`nodecidr-${keyPrefix}`}
           label="static ip"
+          usedFor={["management", ...(managementBridge?.purposes.map((p) => purposeInfoFor(p).label) ?? [])].join(", ")}
           value={node.network.cidr}
           onChange={(value) => onChange({ cidr: value })}
           placeholder={managementCidrPlaceholder}
@@ -2734,23 +2807,27 @@ function NetworkFields({
         const isManagement = iface.id === node.network.managementInterfaceId;
         const count = bridgeCountFor(node.network.bridgeCounts, iface.id);
         const bridge = node.network.bridges[bridgeKey(iface.id, 0)];
+        // ceph/zfs get the whole bond — no extra vlan-tagged bridges to
+        // split its bandwidth or latency budget with anything else.
+        const isDedicatedStorageBond = iface.id.startsWith("bond-") && isDedicatedStorageBondPurpose(bridge?.purposes ?? []);
 
         return (
-          <div key={iface.id} className="flex flex-col" style={{ gap: "var(--space-3)" }}>
+          <div key={iface.id} className="flex flex-col border border-border bg-surface-100 p-5" style={{ gap: "var(--space-3)" }}>
+            <p className="label text-ink-muted">{iface.label}</p>
+
             {!isManagement &&
               bridge &&
               (() => {
                 const needsHostIp = needsHostIpForPurposes(bridge.purposes, bridge.otherNeedsHostIp);
                 const key0 = bridgeKey(iface.id, 0);
                 const ipError =
-                  (needsHostIp ? validateHostCidr(bridge.ip) : validateCidr(bridge.ip)) ??
+                  (needsHostIp ? validateHostCidr(bridge.ip) : validateNetwork(bridge.ip)) ??
                   conflicts.get(`${nodeIndex}#${key0}`) ??
                   null;
-                const bridgeNameError = validateInterfaceName(bridge.name) ?? validateUniqueName(bridge.name, allNames);
+                const bridgeNameError = validateInterfaceName(bridge.name) ?? validateUniqueName(bridge.name, names.interfaces);
                 const comboHint = purposeComboHint(bridge.purposes);
                 return (
-                  <div className="flex flex-col border border-border bg-surface-100 p-5" style={{ gap: "var(--space-3)" }}>
-                    <p className="label text-ink-muted">{iface.label}</p>
+                  <>
                     <label className="pc-checkbox">
                       <input
                         type="checkbox"
@@ -2854,7 +2931,8 @@ function NetworkFields({
 
                         <CidrField
                           id={`bridgeip-${keyPrefix}-${key0}`}
-                          label={needsHostIp ? "static ip for this node" : "network (optional)"}
+                          label={needsHostIp ? "static ip for this node" : "network"}
+                          usedFor={purposesUsedForLabel(bridge.purposes)}
                           value={bridge.ip}
                           onChange={(value) => onBridgeChange(key0, { ip: value })}
                           placeholder={(() => {
@@ -2867,51 +2945,60 @@ function NetworkFields({
                           hint={
                             needsHostIp
                               ? requiredIpHintFor(bridge.purposes, bridge.otherNeedsHostIp)
-                              : "the subnet vms/cts on this bridge should use — purely informational, the host won't have an address here"
+                              : "the subnet vms/cts on this bridge should use — the host itself still won't have an address here"
                           }
                           defaultPrefix={lanPrefix}
-                          required={needsHostIp}
+                          required
                         />
                       </>
                     )}
-                  </div>
+                  </>
                 );
               })()}
 
-            <BridgeCountField
-              keyPrefix={keyPrefix}
-              interfaceId={iface.id}
-              count={node.network.bridgeCounts[iface.id] ?? "1"}
-              onBridgeCountChange={onBridgeCountChange}
-            />
-
-            {Array.from({ length: Math.max(0, count - 1) }, (_, k) => k + 1).map((index) => {
-              const extraKey = bridgeKey(iface.id, index);
-              const extraBridge = node.network.bridges[extraKey];
-              if (!extraBridge) return null;
-              return (
-                <ExtraBridgeCard
-                  key={extraKey}
+            {isDedicatedStorageBond ? (
+              <p className="body-sm pc-field__hint">
+                bridges on this interface — locked to 1: {bridge?.purposes.includes("ceph") ? "ceph" : "zfs replication"} gets this
+                bond to itself, so it can&apos;t be split into extra vlan-tagged bridges for anything else.
+              </p>
+            ) : (
+              <>
+                <BridgeCountField
                   keyPrefix={keyPrefix}
-                  bridgeId={extraKey}
-                  heading={`${iface.label} — extra bridge (${extraBridge.name})`}
-                  bridge={extraBridge}
-                  siblingVlanTags={siblingVlanTagsFor(node.network.bridges, count, iface.id, index)}
-                  allNames={allNames}
-                  purposeOptions={purposeOptions}
-                  storagePurpose={storagePurpose}
-                  storagePurposeMissingHint={storagePurposeMissingHint}
-                  onBridgeChange={onBridgeChange}
-                  address={{
-                    lanPrefix,
-                    secondarySubnet:
-                      placeholders.get(`${nodeIndex}#${extraKey}`) ??
-                      nonCollidingPlaceholderSubnet(node, globalCidr, addressKeys.indexOf(extraKey), nodeIndex),
-                  }}
-                  conflictError={conflicts.get(`${nodeIndex}#${extraKey}`) ?? null}
+                  interfaceId={iface.id}
+                  count={node.network.bridgeCounts[iface.id] ?? "1"}
+                  onBridgeCountChange={onBridgeCountChange}
                 />
-              );
-            })}
+
+                {Array.from({ length: Math.max(0, count - 1) }, (_, k) => k + 1).map((index) => {
+                  const extraKey = bridgeKey(iface.id, index);
+                  const extraBridge = node.network.bridges[extraKey];
+                  if (!extraBridge) return null;
+                  return (
+                    <ExtraBridgeCard
+                      key={extraKey}
+                      keyPrefix={keyPrefix}
+                      bridgeId={extraKey}
+                      heading={`extra bridge (${extraBridge.name})`}
+                      bridge={extraBridge}
+                      siblingVlanTags={siblingVlanTagsFor(node.network.bridges, count, iface.id, index)}
+                      names={names}
+                      purposeOptions={purposeOptions}
+                      storagePurpose={storagePurpose}
+                      storagePurposeMissingHint={storagePurposeMissingHint}
+                      onBridgeChange={onBridgeChange}
+                      address={{
+                        lanPrefix,
+                        secondarySubnet:
+                          placeholders.get(`${nodeIndex}#${extraKey}`) ??
+                          nonCollidingPlaceholderSubnet(node, globalCidr, addressKeys.indexOf(extraKey), nodeIndex),
+                      }}
+                      conflictError={conflicts.get(`${nodeIndex}#${extraKey}`) ?? null}
+                    />
+                  );
+                })}
+              </>
+            )}
           </div>
         );
       })}
@@ -2930,94 +3017,14 @@ function NetworkFields({
   );
 }
 
-// bump this whenever the shape of PersistedState (or anything nested inside
-// it) changes — a mismatched version is discarded wholesale rather than
-// risking a crash or a half-applied state from an older save.
-const STORAGE_KEY = "proxmox-computer:setup-wizard";
-const STORAGE_VERSION = 5;
-
-interface PersistedState {
-  version: number;
-  currentStep: WizardStepId;
-  nodeCount: string;
-  hostnameSuffix: string;
-  globalCidr: string;
-  gateway: string;
-  nodes: NodeInfo[];
-  identicalHardware: boolean;
-  identicalNetwork: boolean;
-  storageHaMode: StorageHaMode;
-}
-
-// deliberately not exhaustive — every individual field getting checked would
-// make this as brittle as the state it's guarding. the version check above
-// is the real defense against a shape change; this just catches obviously
-// corrupt or hand-edited data within the same version before it ever
-// reaches setState.
-function isPersistedState(value: unknown): value is PersistedState {
-  if (!value || typeof value !== "object") return false;
-  const v = value as Record<string, unknown>;
-  if (v.version !== STORAGE_VERSION) return false;
-  if (v.currentStep !== "hardware" && v.currentStep !== "network") return false;
-  if (typeof v.nodeCount !== "string") return false;
-  if (typeof v.hostnameSuffix !== "string") return false;
-  if (typeof v.globalCidr !== "string") return false;
-  if (typeof v.gateway !== "string") return false;
-  if (typeof v.identicalHardware !== "boolean") return false;
-  if (typeof v.identicalNetwork !== "boolean") return false;
-  if (v.storageHaMode !== "ceph" && v.storageHaMode !== "zfs-replication" && v.storageHaMode !== "none") return false;
-  if (!Array.isArray(v.nodes)) return false;
-
-  for (const node of v.nodes) {
-    if (!node || typeof node !== "object") return false;
-    const n = node as Record<string, unknown>;
-    if (typeof n.name !== "string") return false;
-    if (typeof n.cpuVendor !== "string") return false;
-    if (typeof n.cpuFamily !== "string") return false;
-    if (!Array.isArray(n.nics)) return false;
-    if (!Array.isArray(n.additionalDisks)) return false;
-
-    if (!n.network || typeof n.network !== "object") return false;
-    const net = n.network as Record<string, unknown>;
-    if (typeof net.hostLabel !== "string") return false;
-    if (typeof net.cidr !== "string") return false;
-    if (typeof net.managementInterfaceId !== "string") return false;
-    if (!Array.isArray(net.bonds)) return false;
-    if (!net.bridgeCounts || typeof net.bridgeCounts !== "object") return false;
-    if (!net.bridges || typeof net.bridges !== "object") return false;
-    for (const b of Object.values(net.bridges as Record<string, unknown>)) {
-      if (!b || typeof b !== "object") return false;
-      const bridge = b as Record<string, unknown>;
-      if (typeof bridge.enabled !== "boolean") return false;
-      if (typeof bridge.name !== "string") return false;
-      if (!Array.isArray(bridge.purposes)) return false;
-      if (typeof bridge.ip !== "string") return false;
-      if (typeof bridge.vlanTag !== "string") return false;
-    }
-  }
-
-  return true;
-}
-
-function loadPersistedState(): PersistedState | null {
-  try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) return null;
-    const parsed: unknown = JSON.parse(raw);
-    return isPersistedState(parsed) ? parsed : null;
-  } catch {
-    // corrupt json, storage unavailable (private browsing, disabled, etc.),
-    // or anything else — treat exactly like "nothing saved".
-    return null;
-  }
-}
-
 export default function Setup() {
+  const router = useRouter();
   const [currentStep, setCurrentStep] = useState<WizardStepId>("hardware");
   const [nodeCount, setNodeCount] = useState("1");
   const [hostnameSuffix, setHostnameSuffix] = useState("homelab.lan");
   const [globalCidr, setGlobalCidr] = useState("10.0.10.0/24");
   const [gateway, setGateway] = useState(() => deriveGateway("10.0.10.0/24"));
+  const [homelabVlan, setHomelabVlan] = useState("");
   const [nodes, setNodes] = useState<NodeInfo[]>([defaultNode(0, "10.0.10.0/24")]);
   const [identicalHardware, setIdenticalHardware] = useState(false);
   const [identicalNetwork, setIdenticalNetwork] = useState(false);
@@ -3044,6 +3051,7 @@ export default function Setup() {
       setHostnameSuffix(saved.hostnameSuffix);
       setGlobalCidr(saved.globalCidr);
       setGateway(saved.gateway);
+      setHomelabVlan(saved.homelabVlan);
       setNodes(saved.nodes);
       setIdenticalHardware(saved.identicalHardware);
       setIdenticalNetwork(saved.identicalNetwork);
@@ -3066,6 +3074,7 @@ export default function Setup() {
           hostnameSuffix,
           globalCidr,
           gateway,
+          homelabVlan,
           nodes,
           identicalHardware,
           identicalNetwork,
@@ -3084,6 +3093,7 @@ export default function Setup() {
     hostnameSuffix,
     globalCidr,
     gateway,
+    homelabVlan,
     nodes,
     identicalHardware,
     identicalNetwork,
@@ -3096,6 +3106,9 @@ export default function Setup() {
   // the real subnet size for this homelab — used to fill in a sane
   // /prefix when a visitor types a bare ip with none, instead of /32.
   const lanPrefix = subnetDetails(globalCidr)?.prefix ?? 24;
+  // see maxBondsForCluster — one node's bond-count ceiling can't exceed
+  // what the least-equipped node in the cluster could ever host.
+  const maxBonds = maxBondsForCluster(nodes);
   // one cluster-wide pass of ip/network suggestions for the network step
   // — recomputed whenever any node's network changes, so a shared-purpose
   // bridge's placeholder always reflects whatever an earlier node already
@@ -3193,7 +3206,7 @@ export default function Setup() {
     setNodes((prev) =>
       prev.map((node, i) => {
         if (i !== index) return node;
-        const clamped = !Number.isNaN(n) && n >= 1 && n <= 8 ? n : node.nics.length;
+        const clamped = !Number.isNaN(n) && n >= 1 && n <= MAX_NICS_PER_NODE ? n : node.nics.length;
         return {
           ...node,
           nicCount: value,
@@ -3250,7 +3263,7 @@ export default function Setup() {
     const n = parseInt(value, 10);
     setNodes((prev) =>
       prev.map((node) => {
-        const clamped = !Number.isNaN(n) && n >= 1 && n <= 8 ? n : node.nics.length;
+        const clamped = !Number.isNaN(n) && n >= 1 && n <= MAX_NICS_PER_NODE ? n : node.nics.length;
         return {
           ...node,
           nicCount: value,
@@ -3311,9 +3324,10 @@ export default function Setup() {
   }
 
   // when "identical network setup" is on, every structural change below
-  // (bonds, management interface, bridge purposes/enabled/name) is mirrored
-  // onto every node right after it's applied to the one actually edited —
-  // hostLabel/cidr/bridge-ip never go through this path, so those stay
+  // (bonds, management interface, bridge purposes/enabled/name, and a
+  // pure vm/ct bridge's declared subnet) is mirrored onto every node right
+  // after it's applied to the one actually edited — hostLabel, cidr, and
+  // any real per-node static ip never go through this path, so those stay
   // unique regardless.
   function propagateIfIdentical(updated: NodeInfo[], sourceIndex: number): NodeInfo[] {
     return identicalNetwork ? applyNetworkStructure(updated, updated[sourceIndex].network) : updated;
@@ -3332,7 +3346,7 @@ export default function Setup() {
 
   function updateBridge(index: number, interfaceId: string, patch: Partial<BridgeConfig>) {
     setNodes((prev) => {
-      const updated = prev.map((node, i) =>
+      let updated = prev.map((node, i) =>
         i === index
           ? {
               ...node,
@@ -3346,9 +3360,45 @@ export default function Setup() {
             }
           : node,
       );
-      // ip is always this node's own address — never propagate it, even
-      // when nodes are otherwise kept structurally identical.
-      const isStructural = "purposes" in patch || "enabled" in patch || "name" in patch || "otherNeedsHostIp" in patch;
+      const editedBridge = updated[index].network.bridges[interfaceId];
+
+      // ceph/zfs claim the whole bond (see isDedicatedStorageBondPurpose)
+      // — the moment a bond's own native bridge picks up either purpose,
+      // drop any extra vlan-tagged bridges it already had and lock the
+      // count back to 1, rather than leaving them configured but now
+      // forbidden to edit.
+      const [ifaceId, bridgeIndex] = interfaceId.split("#");
+      if (
+        "purposes" in patch &&
+        bridgeIndex === "0" &&
+        ifaceId.startsWith("bond-") &&
+        editedBridge &&
+        isDedicatedStorageBondPurpose(editedBridge.purposes)
+      ) {
+        updated = updated.map((node, i) => {
+          if (i !== index) return node;
+          const currentCount = bridgeCountFor(node.network.bridgeCounts, ifaceId);
+          if (currentCount <= 1) return node;
+          const bridges = { ...node.network.bridges };
+          for (let idx = 1; idx < currentCount; idx++) delete bridges[bridgeKey(ifaceId, idx)];
+          return {
+            ...node,
+            network: { ...node.network, bridgeCounts: { ...node.network.bridgeCounts, [ifaceId]: "1" }, bridges },
+          };
+        });
+      }
+
+      // a real per-node static ip is always this node's own address —
+      // never propagate that. but a pure vm/ct bridge's ip is just its
+      // declared subnet, which IS shared structure (see
+      // applyNetworkStructure), so an edit to it propagates same as a
+      // purpose/name/enabled change would.
+      const isStructural =
+        "purposes" in patch ||
+        "enabled" in patch ||
+        "name" in patch ||
+        "otherNeedsHostIp" in patch ||
+        ("ip" in patch && !!editedBridge && !needsHostIpForPurposes(editedBridge.purposes, editedBridge.otherNeedsHostIp));
       return isStructural ? propagateIfIdentical(updated, index) : updated;
     });
   }
@@ -3362,10 +3412,20 @@ export default function Setup() {
     setNodes((prev) => {
       const updated = prev.map((node, i) => {
         if (i !== index) return node;
+        // belt-and-suspenders alongside the UI hiding this control
+        // entirely: a ceph/zfs bond never gets more than its one native
+        // bridge, no matter what value comes in.
+        const isDedicatedStorageBond =
+          interfaceId.startsWith("bond-") &&
+          isDedicatedStorageBondPurpose(node.network.bridges[bridgeKey(interfaceId, 0)]?.purposes ?? []);
+        if (isDedicatedStorageBond) return node;
         const n = parseInt(value, 10);
-        const clamped = !Number.isNaN(n) && n >= 1 && n <= 4 ? n : bridgeCountFor(node.network.bridgeCounts, interfaceId);
+        const clamped =
+          !Number.isNaN(n) && n >= 1 && n <= MAX_BRIDGES_PER_INTERFACE
+            ? n
+            : bridgeCountFor(node.network.bridgeCounts, interfaceId);
         const bridges = { ...node.network.bridges };
-        for (let idx = 0; idx < 8; idx++) {
+        for (let idx = 0; idx < MAX_BRIDGES_PER_INTERFACE; idx++) {
           const key = bridgeKey(interfaceId, idx);
           if (idx < clamped && !bridges[key]) {
             bridges[key] = {
@@ -3396,13 +3456,18 @@ export default function Setup() {
   function handleBondCountChange(index: number, value: string) {
     const n = parseInt(value, 10);
     setNodes((prev) => {
+      // read off prev, not the maxBonds already in scope — this always
+      // has to reflect the nic counts as they stand right now, not
+      // whatever they were on the last render.
+      const cap = maxBondsForCluster(prev);
       const updated = prev.map((node, i) => {
         if (i !== index) return node;
-        const clamped = !Number.isNaN(n) && n >= 0 && n <= 4 ? n : node.network.bonds.length;
+        const clamped = !Number.isNaN(n) && n >= 0 && n <= cap ? n : node.network.bonds.length;
         const bonds = resizeArray(node.network.bonds, clamped, (idx) => ({
           name: defaultBondName(idx),
           mode: "active-backup" as BondMode,
           nicIndices: [],
+          vlanTag: "",
         }));
         return { ...node, network: resyncNetworkForNics(node.network, node.nics.length, { bonds }) };
       });
@@ -3427,12 +3492,12 @@ export default function Setup() {
     });
   }
 
-  function updateBondMeta(index: number, bondIndex: number, patch: Partial<Pick<BondConfig, "name" | "mode">>) {
+  function updateBondMeta(index: number, bondIndex: number, patch: Partial<Pick<BondConfig, "name" | "mode" | "vlanTag">>) {
     setNodes((prev) => {
       const updated = prev.map((node, i) => {
         if (i !== index) return node;
-        // name/mode never change which interfaces exist, so patch bonds
-        // directly rather than going through the full resync — that
+        // name/mode/vlanTag never change which interfaces exist, so patch
+        // bonds directly rather than going through the full resync — that
         // would otherwise wipe out bridge customizations for no reason.
         const bonds = node.network.bonds.map((b, j) => (j === bondIndex ? { ...b, ...patch } : b));
         return { ...node, network: { ...node.network, bonds } };
@@ -3444,6 +3509,7 @@ export default function Setup() {
   const nodeCountError = validateIntRange(nodeCount, 1, 16, { required: true });
   const hostnameSuffixError = validateHostnameSuffix(hostnameSuffix);
   const globalCidrError = validateCidr(globalCidr);
+  const homelabVlanError = validateOptionalVlanTag(homelabVlan);
   const gatewayError = validateIp(gateway);
 
   return (
@@ -3541,7 +3607,7 @@ export default function Setup() {
                     <HardwareFields
                       keyPrefix="shared"
                       values={nodes[0]}
-                      allNames={collectNodeNames(nodes[0])}
+                      names={collectNodeNames(nodes[0])}
                       onChange={updateAllNodesHardware}
                       onNicCountChange={updateAllNodesNicCount}
                       onNicChange={updateAllNodesNic}
@@ -3585,7 +3651,7 @@ export default function Setup() {
                         <HardwareFields
                           keyPrefix={`node-${i}`}
                           values={node}
-                          allNames={collectNodeNames(node)}
+                          names={collectNodeNames(node)}
                           onChange={(patch) => updateNode(i, patch)}
                           onNicCountChange={(value) => handleNicCountChange(i, value)}
                           onNicChange={(nicIndex, patch) => updateNic(i, nicIndex, patch)}
@@ -3611,9 +3677,13 @@ export default function Setup() {
                 <Link href="/" className="pc-btn pc-btn--ghost">
                   ← back to overview
                 </Link>
-                <button type="button" className="pc-btn pc-btn--primary" onClick={() => setCurrentStep("network")}>
+                <button
+                  type="button"
+                  className="pc-btn pc-btn--primary"
+                  onClick={() => router.push("/setup/preview/hardware")}
+                >
                   <span className="pc-btn__bracket">[</span>
-                  next
+                  preview
                   <span className="pc-btn__bracket">]</span>
                 </button>
               </div>
@@ -3660,6 +3730,29 @@ export default function Setup() {
                   error={globalCidrError}
                   hint="the network your nodes live on — used to generate each node's management ip"
                 />
+
+                <div className={`pc-field ${homelabVlanError ? "pc-field--error" : ""}`}>
+                  <label className="label pc-field__label" htmlFor="homelab-vlan">
+                    main homelab vlan
+                  </label>
+                  <div className="pc-field__control">
+                    <span className="code pc-field__bracket">#</span>
+                    <input
+                      id="homelab-vlan"
+                      className="pc-field__input code"
+                      type="number"
+                      min={1}
+                      max={4094}
+                      placeholder="e.g. 10"
+                      value={homelabVlan}
+                      onChange={(e) => setHomelabVlan(e.target.value)}
+                    />
+                  </div>
+                  <span className="body-sm pc-field__hint">
+                    {homelabVlanError ??
+                      "only if your switch numbers the untagged network — leave blank for a flat, unnumbered homelab"}
+                  </span>
+                </div>
 
                 <div className={`pc-field ${gatewayError ? "pc-field--error" : ""}`}>
                   <label className="label pc-field__label" htmlFor="gateway">
@@ -3754,8 +3847,12 @@ export default function Setup() {
                       keyPrefix="shared"
                       node={nodes[0]}
                       nodeCount={nodes.length}
+                      maxBonds={maxBonds}
                       storageHaMode={storageHaMode}
                       storagePurpose={storagePurpose}
+                      globalCidr={globalCidr}
+                      lanPrefix={lanPrefix}
+                      placeholders={networkPlaceholders}
                       onBondCountChange={(value) => handleBondCountChange(0, value)}
                       onToggleBondNic={(bondIndex, nicIndex, checked) => toggleBondNic(0, bondIndex, nicIndex, checked)}
                       onUpdateBondMeta={(bondIndex, patch) => updateBondMeta(0, bondIndex, patch)}
@@ -3797,6 +3894,7 @@ export default function Setup() {
                         lanPrefix={lanPrefix}
                         globalCidr={globalCidr}
                         nodeCount={nodes.length}
+                        maxBonds={maxBonds}
                         storageHaMode={storageHaMode}
                         storagePurpose={storagePurpose}
                         placeholders={networkPlaceholders}
@@ -3820,9 +3918,13 @@ export default function Setup() {
                   back
                   <span className="pc-btn__bracket">]</span>
                 </button>
-                <button type="button" className="pc-btn" disabled title="steps 3–5 aren't built yet">
+                <button
+                  type="button"
+                  className="pc-btn pc-btn--primary"
+                  onClick={() => router.push("/setup/preview/network")}
+                >
                   <span className="pc-btn__bracket">[</span>
-                  next
+                  preview
                   <span className="pc-btn__bracket">]</span>
                 </button>
               </div>
