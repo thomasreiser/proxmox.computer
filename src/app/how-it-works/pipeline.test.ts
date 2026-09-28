@@ -88,7 +88,7 @@ describe("the flows between phases", () => {
     expect(seen.size).toBe(PHASES.length);
   });
 
-  it("has a stroke colour for every flow kind in use", () => {
+  it("has a stroke color for every flow kind in use", () => {
     for (const flow of FLOWS) expect(FLOW_STROKE[flow.kind]).toBeTruthy();
   });
 });

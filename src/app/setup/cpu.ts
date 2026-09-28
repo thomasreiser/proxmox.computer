@@ -1,4 +1,4 @@
-// The cpu-family catalogue and the questions the wizard asks of it: what
+// The cpu-family catalog and the questions the wizard asks of it: what
 // qemu type a display name resolves to, and which families share one. Live
 // migration only works between nodes whose *resolved* type matches, so the
 // resolution step — not the pretty name — is what every check downstream

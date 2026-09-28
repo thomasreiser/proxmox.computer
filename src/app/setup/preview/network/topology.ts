@@ -9,8 +9,10 @@ import {
   bridgeKey,
   interfacesFor,
   needsHostIpForPurposes,
+  effectivePort,
   nicIndicesForInterface,
   type InterfacePurpose,
+  type NicPort,
   type NicSpeed,
   type NodeInfo,
 } from "../../wizard-state";
@@ -40,7 +42,7 @@ export type BridgeAddressKind = "host" | "network";
 
 export interface BridgeAddress {
   kind: BridgeAddressKind;
-  // "" until the visitor fills it in — still worth drawing as a labelled,
+  // "" until the visitor fills it in — still worth drawing as a labeled,
   // obviously-empty slot, since a missing address is a real gap in the
   // plan rather than something to hide.
   cidr: string;
@@ -76,6 +78,9 @@ export interface CableInfo {
   nicIndex: number;
   nicName: string;
   nicSpeed: NicSpeed;
+  // the connector the switch port has to match — null when the speed is
+  // "other / not sure", so there's nothing to say
+  nicPort: NicPort | null;
   iface: InterfaceTopology;
 }
 
@@ -249,6 +254,7 @@ export function buildClusterTopology(nodes: NodeInfo[], ctx: ClusterContext): No
       nicIndex,
       nicName: nic.name,
       nicSpeed: nic.speed,
+      nicPort: effectivePort(nic),
       // a nic can only be missing an interface transiently, between a
       // structural edit and its resync — fall back to an unbonded, empty
       // interface rather than crash the preview mid-edit.
@@ -280,4 +286,42 @@ export function buildClusterTopology(nodes: NodeInfo[], ctx: ClusterContext): No
 // worth showing at all.
 export function cephCableCount(topologies: NodeTopology[]): number {
   return topologies.reduce((n, t) => n + t.cables.filter((c) => c.iface.carriesCeph).length, 0);
+}
+
+/**
+ * How the switch port for this interface has to be configured, in the
+ * shorthand switch uis use: "u" for the untagged (native) vlan — "u5"
+ * when the homelab numbers it — and "t20,30" for the 802.1q-tagged vlans
+ * the bridges above it ride. A tagged bridge still missing its tag shows
+ * as "t?", since the port can't be configured until it has one.
+ */
+export function portVlanLabel(iface: InterfaceTopology): string {
+  if (iface.bridges.length === 0) return "—";
+  const parts: string[] = [];
+  const native = iface.bridges.find((b) => b.vlan.kind === "native");
+  if (native && native.vlan.kind === "native") {
+    parts.push(native.vlan.homelabVlan !== null ? `u${native.vlan.homelabVlan}` : "u");
+  }
+  const tagged = [
+    ...new Set(iface.bridges.flatMap((b) => (b.vlan.kind === "tagged" ? [b.vlan.tag] : []))),
+  ].sort((a, b) => a - b);
+  const unset = iface.bridges.some((b) => b.vlan.kind === "unset");
+  if (tagged.length > 0 || unset) parts.push(`t${[...tagged, ...(unset ? ["?"] : [])].join(",")}`);
+  return parts.join(" ");
+}
+
+/** the same, spelled out — for the port's tooltip */
+export function portVlanDescription(iface: InterfaceTopology): string {
+  if (iface.bridges.length === 0) return "no bridges — nothing to configure";
+  const parts: string[] = [];
+  const native = iface.bridges.find((b) => b.vlan.kind === "native");
+  if (native && native.vlan.kind === "native") {
+    parts.push(native.vlan.homelabVlan !== null ? `untagged: vlan ${native.vlan.homelabVlan}` : "untagged");
+  }
+  const tagged = [
+    ...new Set(iface.bridges.flatMap((b) => (b.vlan.kind === "tagged" ? [b.vlan.tag] : []))),
+  ].sort((a, b) => a - b);
+  if (tagged.length > 0) parts.push(`tagged: vlan ${tagged.join(", ")}`);
+  if (iface.bridges.some((b) => b.vlan.kind === "unset")) parts.push("a tagged bridge has no vlan set yet");
+  return parts.join(" · ");
 }

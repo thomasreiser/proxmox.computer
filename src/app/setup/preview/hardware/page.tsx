@@ -3,19 +3,31 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
-import { Background, BackgroundVariant, Controls, MiniMap, ReactFlow } from "@xyflow/react";
+import {
+  Background,
+  BackgroundVariant,
+  Controls,
+  ReactFlow,
+  ReactFlowProvider,
+  useNodesInitialized,
+  useReactFlow,
+} from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
+import { problemsUpTo } from "../../step-checks";
+import { ProblemList } from "../../problem-list";
 import { loadPersistedState, persistCurrentStep, type NodeInfo, type PersistedState } from "../../wizard-state";
 import { NodeCard, type NodeCardNode } from "./node-card";
+import { gridColumns, gridRowYs } from "./grid";
 
 const nodeTypes = { nodeCard: NodeCard };
 
 const CARD_WIDTH = 300;
 const GAP = 56;
 
-// react flow needs a position before it can measure the real card, so the
-// grid is spaced off an estimate. it only affects initial spacing — the
-// canvas is fit to the actual rendered bounds afterwards.
+// react flow needs a position before it can measure the real card, so
+// the first frame is laid out from an estimate. it's corrected as soon as
+// the cards are measured (see HardwareCanvas) — the estimate alone let a
+// taller-than-expected card run under the row below it.
 function estimateHeight(node: NodeInfo): number {
   return 150 + (1 + node.additionalDisks.length) * 42 + node.nics.length * 26;
 }
@@ -25,15 +37,61 @@ function diskSizes(node: NodeInfo): number[] {
 }
 
 function layoutNodes(nodes: NodeInfo[]): NodeCardNode[] {
-  const cols = Math.min(Math.max(nodes.length, 1), 4);
-  const rowHeight = Math.max(...nodes.map(estimateHeight), 200) + GAP;
+  const cols = gridColumns(nodes.length);
+  const ys = gridRowYs(nodes.map(estimateHeight), cols, GAP);
   const maxDiskGb = Math.max(1, ...nodes.flatMap(diskSizes));
   return nodes.map((node, i) => ({
     id: `node-${i}`,
     type: "nodeCard" as const,
-    position: { x: (i % cols) * (CARD_WIDTH + GAP), y: Math.floor(i / cols) * rowHeight },
+    position: { x: (i % cols) * (CARD_WIDTH + GAP), y: ys[i] },
     data: { node, index: i, maxDiskGb },
   }));
+}
+
+// the canvas, inside a ReactFlowProvider so it can re-place the rows once
+// the real card heights are known
+function HardwareCanvas({ nodes }: { nodes: NodeCardNode[] }) {
+  const { setNodes, fitView } = useReactFlow();
+  const initialized = useNodesInitialized();
+
+  useEffect(() => {
+    if (!initialized) return;
+    setNodes((current) => {
+      const ordered = [...current].sort((a, b) => Number(a.id.slice(5)) - Number(b.id.slice(5)));
+      const ys = gridRowYs(
+        ordered.map((n) => n.measured?.height ?? 0),
+        gridColumns(ordered.length),
+        GAP,
+      );
+      const yById = new Map(ordered.map((n, i) => [n.id, ys[i]]));
+      return current.map((n) => ({ ...n, position: { ...n.position, y: yById.get(n.id) ?? n.position.y } }));
+    });
+    requestAnimationFrame(() => fitView({ padding: 0.18 }));
+  }, [initialized, setNodes, fitView]);
+
+  return (
+    <ReactFlow
+      // a new saved layout (different node count) needs a fresh flow —
+      // defaultNodes is only read once
+      key={nodes.length}
+      defaultNodes={nodes}
+      nodeTypes={nodeTypes}
+      fitView
+      fitViewOptions={{ padding: 0.18 }}
+      minZoom={0.2}
+      maxZoom={1.6}
+      nodesConnectable={false}
+      edgesFocusable={false}
+      proOptions={{ hideAttribution: true }}
+      // the canvas sits inside a normally-scrolling page, so the wheel has
+      // to keep scrolling it — zoom is on the controls and on pinch instead.
+      zoomOnScroll={false}
+      preventScrolling={false}
+    >
+      <Background variant={BackgroundVariant.Dots} gap={20} size={1} />
+      <Controls showInteractive={false} />
+    </ReactFlow>
+  );
 }
 
 function sum(values: number[]): number {
@@ -76,7 +134,12 @@ export default function HardwarePreview() {
     };
   }, [saved]);
 
+  // the same gate the wizard's preview button applies: this page can be
+  // opened by url, so "next" can't assume the step behind it is complete
+  const blocking = useMemo(() => (saved ? problemsUpTo("hardware", saved) : []), [saved]);
+
   function goToNetwork() {
+    if (blocking.length > 0) return;
     persistCurrentStep("network");
     router.push("/setup");
   }
@@ -144,34 +207,26 @@ export default function HardwarePreview() {
               </div>
             )}
             {saved && (
-              <ReactFlow
-                nodes={flowNodes}
-                nodeTypes={nodeTypes}
-                fitView
-                fitViewOptions={{ padding: 0.18 }}
-                minZoom={0.2}
-                maxZoom={1.6}
-                nodesConnectable={false}
-                edgesFocusable={false}
-                proOptions={{ hideAttribution: true }}
-                // the canvas sits inside a normally-scrolling page, so the
-                // wheel has to keep scrolling it — zoom is on the controls
-                // and on pinch instead.
-                zoomOnScroll={false}
-                preventScrolling={false}
-              >
-                <Background variant={BackgroundVariant.Dots} gap={20} size={1} />
-                <Controls showInteractive={false} />
-                {flowNodes.length > 4 && <MiniMap pannable zoomable />}
-              </ReactFlow>
+              // no minimap: the canvas is always fitted to every card, so
+              // it only ever showed a gray box
+              <ReactFlowProvider>
+                <HardwareCanvas nodes={flowNodes} />
+              </ReactFlowProvider>
             )}
           </div>
 
+          {hydrated && saved && <ProblemList problems={blocking} step="hardware" />}
           <div className="pc-stepflow__nav">
             <Link href="/setup" className="pc-btn pc-btn--ghost">
               ← back to hardware
             </Link>
-            <button type="button" className="pc-btn pc-btn--primary" onClick={goToNetwork}>
+            <button
+              type="button"
+              className="pc-btn pc-btn--primary"
+              onClick={goToNetwork}
+              disabled={blocking.length > 0}
+              title={blocking.length > 0 ? "fix the problems listed above first" : undefined}
+            >
               <span className="pc-btn__bracket">[</span>
               next
               <span className="pc-btn__bracket">]</span>

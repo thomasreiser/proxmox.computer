@@ -296,7 +296,7 @@ export default function HowItWorks() {
                     old config is copied, a timer is armed to restore it in
                     five minutes, and only then does{" "}
                     <span className="code">ifreload -a</span> run. Reconnect
-                    and the timer is cancelled; get it wrong and the node
+                    and the timer is canceled; get it wrong and the node
                     heals itself while you go make coffee — instead of you
                     driving to wherever it lives.
                   </p>

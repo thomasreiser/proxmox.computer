@@ -17,9 +17,12 @@ import {
   type BridgeConfig,
   type HardwareSpec,
   type InterfacePurpose,
+  type NicInfo,
   type NodeInfo,
   type NodeNetwork,
-  type StorageHaMode,
+  type ClusterStorage,
+  enabledStorageModes,
+  type StoragePlan,
 } from "./wizard-state";
 import { DEFAULT_CPU_FAMILY, defaultCoresFor } from "./cpu";
 import { parseIpv4, subnetDetails } from "./validation";
@@ -28,8 +31,39 @@ export function defaultNicName(index: number): string {
   return `nic-${index + 1}`;
 }
 
+// a new disk starts in the cluster pool rather than unused: someone
+// adding a disk beyond boot is almost always adding it *for* the cluster
+// storage they picked, and step 3 is where they'd say otherwise.
+export function defaultNic(index: number): NicInfo {
+  return { speed: "1gbe", name: defaultNicName(index), port: "" };
+}
+
 export function defaultAdditionalDisk(index: number): AdditionalDisk {
-  return { type: "hdd", sizeGb: "", name: `storage-${index + 1}` };
+  return { type: "hdd", sizeGb: "", name: `storage-${index + 1}`, role: "" };
+}
+
+export function defaultStoragePlan(): StoragePlan {
+  return {
+    ceph: { poolName: "ceph-vm", replicas: "3", minReplicas: "2" },
+    zfs: { poolName: "tank", raidLevel: "mirror", replicationMinutes: "15" },
+    local: { kind: "zfs", name: "local-zfs" },
+  };
+}
+
+/**
+ * Copies one node's disk roles onto every other node, for "identical
+ * storage". Roles are matched by position, which is the only thing the
+ * nodes reliably share — a node with fewer disks simply takes as many
+ * roles as it has, and a node with more leaves its extras alone rather
+ * than inventing a role for a disk the template doesn't describe.
+ */
+export function applyStorageRoles(nodes: NodeInfo[], template: AdditionalDisk[]): NodeInfo[] {
+  return nodes.map((node) => ({
+    ...node,
+    additionalDisks: node.additionalDisks.map((disk, i) =>
+      template[i] ? { ...disk, role: template[i].role } : disk,
+    ),
+  }));
 }
 
 // the cluster's effective disk budget for ceph/zfs is set by its worst-
@@ -57,20 +91,27 @@ export function clusterStorageDisksAvailable(nodes: NodeInfo[]): boolean {
   return minAdditionalDisks(nodes) >= 1;
 }
 
-// the mode that should currently be in effect for cluster storage — falls
-// back to "none" if the visitor's actual choice (ceph or zfs) needs disks
-// that aren't there, without discarding that choice below: add the disks
-// back and it re-selects itself.
-export function effectiveStorageHaMode(mode: StorageHaMode, nodes: NodeInfo[]): StorageHaMode {
-  if (nodes.length < 2) return "none";
-  if (mode !== "none" && !clusterStorageDisksAvailable(nodes)) return "none";
-  return mode;
+/**
+ * The cluster storage actually in effect. Each mode needs at least 2 nodes
+ * and a disk beyond boot on every node; both at once need two such disks,
+ * because ceph takes each osd disk whole and zfs can't share it. When only
+ * one fits, ceph stays — it's the one guests' disks live on, where zfs
+ * replication is the add-on.
+ *
+ * Read-side only: the visitor's choice is never overwritten, so adding
+ * the disks back brings a dropped mode back.
+ */
+export function effectiveClusterStorage(chosen: ClusterStorage, nodes: NodeInfo[]): ClusterStorage {
+  const disks = nodes.length < 2 ? 0 : minAdditionalDisks(nodes);
+  const ceph = chosen.ceph && disks >= 1;
+  const zfs = chosen.zfs && disks >= (ceph ? 2 : 1);
+  if (ceph === chosen.ceph && zfs === chosen.zfs) return chosen;
+  return { ceph, zfs };
 }
 
-export function activeStoragePurpose(mode: StorageHaMode): InterfacePurpose | null {
-  if (mode === "ceph") return "ceph";
-  if (mode === "zfs-replication") return "zfs";
-  return null;
+/** the nic purposes the enabled cluster storage needs — named the same */
+export function activeStoragePurposes(cs: ClusterStorage): InterfacePurpose[] {
+  return enabledStorageModes(cs);
 }
 
 export function defaultBondName(index: number): string {
@@ -146,8 +187,8 @@ export function defaultHardware(): HardwareSpec {
     additionalDisks: [],
     nicCount: "2",
     nics: [
-      { speed: "1gbe", name: defaultNicName(0) },
-      { speed: "1gbe", name: defaultNicName(1) },
+      defaultNic(0),
+      defaultNic(1),
     ],
   };
 }
@@ -619,9 +660,13 @@ export function applyNetworkStructure(nodes: NodeInfo[], template: NodeNetwork):
 // the storage/ha decision, zfs losing its disks) makes a purpose no
 // longer offered, so state doesn't silently keep a selection the ui has
 // no way left to show or edit.
+// Returns the same array when nothing was stripped. It runs from an effect
+// whose own setNodes re-triggers it, so a fresh array every time would
+// re-render forever.
 export function withoutPurposes(nodes: NodeInfo[], toStrip: InterfacePurpose[]): NodeInfo[] {
   if (toStrip.length === 0) return nodes;
-  return nodes.map((node) => {
+  let anyChanged = false;
+  const next = nodes.map((node) => {
     let changed = false;
     const nextBridges: Record<string, BridgeConfig> = {};
     for (const [id, bridge] of Object.entries(node.network.bridges)) {
@@ -633,8 +678,11 @@ export function withoutPurposes(nodes: NodeInfo[], toStrip: InterfacePurpose[]):
       const purposes = bridge.purposes.filter((p) => !toStrip.includes(p));
       nextBridges[id] = { ...bridge, purposes: purposes.length > 0 ? purposes : ["vm"] };
     }
-    return changed ? { ...node, network: { ...node.network, bridges: nextBridges } } : node;
+    if (!changed) return node;
+    anyChanged = true;
+    return { ...node, network: { ...node.network, bridges: nextBridges } };
   });
+  return anyChanged ? next : nodes;
 }
 
 // the lowest-numbered vmbrN not already in use — for naming a freshly

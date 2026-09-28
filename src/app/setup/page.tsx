@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import wizardSteps from "@/data/wizard-steps.json";
 import {
   BOND_MODE_OPTIONS,
@@ -12,6 +12,10 @@ import {
   loadPersistedState,
   MAX_BRIDGES_PER_INTERFACE,
   MAX_NICS_PER_NODE,
+  NIC_PORT_LABEL,
+  effectivePort,
+  portChoices,
+  portHint,
   needsHostIpForPurposes,
   nicSpeedLabel,
   nicSpeedsForInterface,
@@ -23,6 +27,7 @@ import {
   type BondConfig,
   type BondMode,
   type BridgeConfig,
+  type DiskRole,
   type DiskType,
   type HardwareSpec,
   type InterfacePurpose,
@@ -31,9 +36,43 @@ import {
   type NodeInfo,
   type NodeNetwork,
   type PersistedState,
-  type StorageHaMode,
+  type ClusterStorage,
+  type StorageMode,
+  enabledStorageModes,
+  type StoragePlan,
   type WizardStepId,
 } from "./wizard-state";
+import {
+  cephDiskTypeHint,
+  cephRawWithoutLargestNodeGb,
+  cephReplicaHint,
+  cephUsableGb,
+  diskRoleOptions,
+  disksWithRole,
+  formatGb,
+  hasLocalDisks,
+  LOCAL_STORAGE_OPTIONS,
+  MAX_CEPH_REPLICAS,
+  minReplicaChoices,
+  replicaChoices,
+  effectiveCephPlan,
+  soleDiskMode,
+  withEffectiveDiskRoles,
+  effectiveRaidLevel,
+  minPoolMembers,
+  mixedDiskSizeHint,
+  raidLevelChoices,
+  nodesWithoutZfsRedundancy,
+  poolMembershipHint,
+  replicationWindowHint,
+  totalGb,
+  validatePoolName,
+  zfsLayoutHint,
+  zfsUsableGb,
+  ZFS_RAID_OPTIONS,
+} from "./storage";
+import { problemsUpTo } from "./step-checks";
+import { ProblemList } from "./problem-list";
 import {
   isValidIPv4,
   subnetDetails,
@@ -44,6 +83,7 @@ import {
   validateHostnameSuffix,
   validateIntRange,
   validateInterfaceName,
+  required,
   validateIp,
   validateNetwork,
   validateOptionalVlanTag,
@@ -69,7 +109,7 @@ import {
   type Hint,
 } from "./hints";
 import {
-  activeStoragePurpose,
+  activeStoragePurposes,
   addressableBridgeKeys,
   applyNetworkStructure,
   buildAddressConflicts,
@@ -77,11 +117,11 @@ import {
   collectNodeNames,
   defaultAdditionalDisk,
   defaultBondName,
-  defaultNicName,
+  defaultNic,
   defaultNode,
   deriveGateway,
   deriveNodeCidr,
-  effectiveStorageHaMode,
+  effectiveClusterStorage,
   isDedicatedStorageBondPurpose,
   maxBondsForCluster,
   minAdditionalDisks,
@@ -91,6 +131,8 @@ import {
   resyncNetworkForNics,
   siblingVlanTagsFor,
   withoutPurposes,
+  applyStorageRoles,
+  defaultStoragePlan,
   type NodeNames,
   type PlaceholderSubnet,
 } from "./derive";
@@ -162,27 +204,17 @@ function requiredIpHintFor(purposes: InterfacePurpose[], otherNeedsHostIp: boole
     .join("; ");
 }
 
-interface StorageHaInfo {
-  value: StorageHaMode;
-  label: string;
-  hint: string;
-}
-
-const STORAGE_HA_OPTIONS: StorageHaInfo[] = [
+// independent switches, not alternatives — see ClusterStorage
+const CLUSTER_STORAGE_OPTIONS: { value: StorageMode; label: string; hint: string }[] = [
   {
     value: "ceph",
     label: "ceph (recommended)",
     hint: "distributed storage built into proxmox — vm disks live on every node, live-migrate freely, survive a node going down",
   },
   {
-    value: "zfs-replication",
+    value: "zfs",
     label: "zfs with replication",
-    hint: "local zfs storage per node, periodically synced to the others — cheaper and simpler than ceph, but replication is scheduled, not instant, so a failover can lose a few minutes of writes",
-  },
-  {
-    value: "none",
-    label: "no ha / sync",
-    hint: "each node's storage is its own island — simplest setup, but a vm doesn't survive its node going down",
+    hint: "local zfs storage per node, periodically synced to the others — cheaper and simpler than ceph, but replication is scheduled, not instant, so a failover can lose a few minutes of writes. alongside ceph, a second copy of what matters — for backups, say",
   },
 ];
 
@@ -222,6 +254,14 @@ const STORAGE_HA_OPTIONS: StorageHaInfo[] = [
 
 
 
+
+/**
+ * Set once the visitor has tried to continue past problems: every field
+ * then shows its error, touched or not. Fields normally hold an error back
+ * until they've been left once, so an empty field nobody has visited looks
+ * fine — which is exactly the field a blocked "continue" has to point at.
+ */
+const RevealErrorsContext = createContext(false);
 
 // A text field for anything in ip or ip/prefix notation, with a small
 // toggle beside the input that expands a subnet breakdown (network,
@@ -269,7 +309,8 @@ function CidrField({
   // actually left the field once.
   const [touched, setTouched] = useState(false);
   const info = subnetDetails(value);
-  const showError = touched && error;
+  const reveal = useContext(RevealErrorsContext);
+  const showError = (touched || reveal) && error;
 
   function handleBlur() {
     setTouched(true);
@@ -456,8 +497,9 @@ function HardwareFields({
   // had, so hold off on error styling until each field's been left once.
   const [sizeTouched, setSizeTouched] = useState<Record<string, boolean>>({});
   const markSizeTouched = (field: string) => setSizeTouched((t) => ({ ...t, [field]: true }));
-  const showRamGbError = sizeTouched.ram && ramGbError;
-  const showBootDiskSizeError = sizeTouched.boot && bootDiskSizeError;
+  const reveal = useContext(RevealErrorsContext);
+  const showRamGbError = (sizeTouched.ram || reveal) && ramGbError;
+  const showBootDiskSizeError = (sizeTouched.boot || reveal) && bootDiskSizeError;
 
   return (
     <>
@@ -652,7 +694,7 @@ function HardwareFields({
 
       {values.additionalDisks.map((disk, j) => {
         const diskSizeError = validateIntRange(disk.sizeGb, 1, 1048576, { required: true });
-        const showDiskSizeError = sizeTouched[`disk-${j}`] && diskSizeError;
+        const showDiskSizeError = (sizeTouched[`disk-${j}`] || reveal) && diskSizeError;
         const diskNameError = validateFriendlyName(disk.name) ?? validateUniqueName(disk.name, names.disks);
         return (
           <div key={j} className="flex flex-col" style={{ gap: "var(--space-3)" }}>
@@ -764,6 +806,28 @@ function HardwareFields({
                 </label>
               ))}
             </fieldset>
+            {/* asked only when the speed leaves a real choice — 10 gbe is
+                sfp+ or rj45, 2.5 gbe is only ever rj45 */}
+            {portChoices(nic.speed).length > 1 && (
+              <fieldset className="pc-radio-group" style={{ border: 0, margin: 0, padding: 0 }}>
+                <legend className="label pc-radio-group__legend">connector</legend>
+                {portChoices(nic.speed).map((port) => (
+                  <label key={port} className="pc-radio">
+                    <input
+                      type="radio"
+                      name={`nicport-${keyPrefix}-${j}`}
+                      checked={effectivePort(nic) === port}
+                      onChange={() => onNicChange(j, { port })}
+                    />
+                    <span className="pc-radio__box" />
+                    <span>
+                      <span className="code pc-radio__label">{NIC_PORT_LABEL[port]}</span>
+                      <span className="body-sm pc-checkbox__hint">{portHint(nic.speed, port)}</span>
+                    </span>
+                  </label>
+                ))}
+              </fieldset>
+            )}
             <div className={`pc-field ${nicNameError ? "pc-field--error" : ""}`}>
               <label className="label pc-field__label" htmlFor={`nicname-${keyPrefix}-${j}`}>
                 friendly name
@@ -813,7 +877,13 @@ function BondFields({
   onToggleBondNic: (bondIndex: number, nicIndex: number, checked: boolean) => void;
   onUpdateBondMeta: (bondIndex: number, patch: Partial<Pick<BondConfig, "name" | "mode" | "vlanTag">>) => void;
 }) {
-  const bondCountError = validateIntRange(node.network.bondCount, 0, maxBonds);
+  const validateBondCount = (value: string) => validateIntRange(value, 0, maxBonds, { required: true });
+  const bondCountField = useDraftCount(
+    node.network.bondCount,
+    (value) => !validateBondCount(value),
+    onBondCountChange,
+  );
+  const bondCountError = validateBondCount(bondCountField.value);
   const names = collectNodeNames(node);
 
   return (
@@ -829,11 +899,9 @@ function BondFields({
             type="number"
             min={0}
             max={maxBonds}
-            value={node.network.bondCount}
-            onChange={(e) => onBondCountChange(e.target.value)}
-            onBlur={() => {
-              if (!node.network.bondCount) onBondCountChange("0");
-            }}
+            value={bondCountField.value}
+            onChange={(e) => bondCountField.onChange(e.target.value)}
+            onBlur={bondCountField.onBlur}
           />
         </div>
         <span className="body-sm pc-field__hint">
@@ -961,7 +1029,7 @@ function ExtraBridgeCard({
   siblingVlanTags,
   names,
   purposeOptions,
-  storagePurpose,
+  storagePurposes,
   storagePurposeMissingHint,
   nicSpeeds,
   onBridgeChange,
@@ -975,7 +1043,7 @@ function ExtraBridgeCard({
   siblingVlanTags: string[];
   names: NodeNames;
   purposeOptions: PurposeInfo[];
-  storagePurpose: InterfacePurpose | null;
+  storagePurposes: InterfacePurpose[];
   storagePurposeMissingHint: ReactNode;
   // the physical nics behind this bridge's interface — only used to check
   // whether a ceph purpose here is riding a fast enough link.
@@ -997,7 +1065,8 @@ function ExtraBridgeCard({
   // "don't flag it red before the visitor has touched it" reasoning as
   // CidrField and the disk-size fields in HardwareFields.
   const [vlanTouched, setVlanTouched] = useState(false);
-  const showVlanError = vlanTouched && vlanError;
+  const reveal = useContext(RevealErrorsContext);
+  const showVlanError = (vlanTouched || reveal) && vlanError;
 
   return (
     <div className="flex flex-col border border-border bg-surface-100 p-5" style={{ gap: "var(--space-3)" }}>
@@ -1054,7 +1123,7 @@ function ExtraBridgeCard({
             </label>
           );
         })}
-        {storagePurpose === null && storagePurposeMissingHint}
+        {storagePurposes.length === 0 && storagePurposeMissingHint}
       </fieldset>
 
       {[comboHint, cephSpeedHint]
@@ -1140,6 +1209,38 @@ function ExtraBridgeCard({
   );
 }
 
+/**
+ * A count field whose committed value must always be valid, but which
+ * still has to be editable: emptying a field and typing a new number is
+ * how most people change it. The input shows its own draft; only a valid
+ * draft is committed, and leaving the field with an invalid one snaps it
+ * back to the committed value.
+ *
+ * Without this, the handler rewrote the field mid-edit — clearing "1"
+ * left it at "1", so typing "2" produced "12" and twelve bridges.
+ */
+function useDraftCount(committed: string, isValid: (value: string) => boolean, commit: (value: string) => void) {
+  const [draft, setDraft] = useState(committed);
+  const [seen, setSeen] = useState(committed);
+  // follow the committed value when it changes from outside (a sibling
+  // node under "identical network", a resync after a nic count change) —
+  // React's documented way to derive state from a changed prop
+  if (committed !== seen) {
+    setSeen(committed);
+    setDraft(committed);
+  }
+  return {
+    value: draft,
+    onChange: (value: string) => {
+      setDraft(value);
+      if (isValid(value)) commit(value);
+    },
+    onBlur: () => {
+      if (!isValid(draft)) setDraft(committed);
+    },
+  };
+}
+
 // a "number of bridges on this interface" count field — 1 is just that
 // interface's native bridge (today's default); raise it to add vlan-
 // tagged siblings sharing the same underlying nic or bond.
@@ -1154,7 +1255,9 @@ function BridgeCountField({
   count: string;
   onBridgeCountChange: (interfaceId: string, value: string) => void;
 }) {
-  const error = validateIntRange(count, 1, MAX_BRIDGES_PER_INTERFACE, { required: true });
+  const validate = (value: string) => validateIntRange(value, 1, MAX_BRIDGES_PER_INTERFACE, { required: true });
+  const field = useDraftCount(count, (value) => !validate(value), (value) => onBridgeCountChange(interfaceId, value));
+  const error = validate(field.value);
   return (
     <div className={`pc-field ${error ? "pc-field--error" : ""}`}>
       <label className="label pc-field__label" htmlFor={`bridgecount-${keyPrefix}-${interfaceId}`}>
@@ -1168,8 +1271,9 @@ function BridgeCountField({
           type="number"
           min={1}
           max={MAX_BRIDGES_PER_INTERFACE}
-          value={count}
-          onChange={(e) => onBridgeCountChange(interfaceId, e.target.value)}
+          value={field.value}
+          onChange={(e) => field.onChange(e.target.value)}
+          onBlur={field.onBlur}
         />
       </div>
       <span className="body-sm pc-field__hint">
@@ -1190,8 +1294,8 @@ function NetworkStructureFields({
   node,
   nodeCount,
   maxBonds,
-  storageHaMode,
-  storagePurpose,
+  anyStorageChosen,
+  storagePurposes,
   globalCidr,
   lanPrefix,
   placeholders,
@@ -1206,8 +1310,9 @@ function NetworkStructureFields({
   node: NodeInfo;
   nodeCount: number;
   maxBonds: number;
-  storageHaMode: StorageHaMode;
-  storagePurpose: InterfacePurpose | null;
+  // whether ceph or zfs is ticked at all — only words the hint below
+  anyStorageChosen: boolean;
+  storagePurposes: InterfacePurpose[];
   // used only for a pure vm/ct bridge's declared network — the one bridge
   // field that lives here rather than in NetworkAddressFields, since it's
   // shared structure now, not a per-node address (see applyNetworkStructure).
@@ -1233,20 +1338,21 @@ function NetworkStructureFields({
     validateInterfaceName(managementBridge?.name || "vmbr0") ??
     validateUniqueName(managementBridge?.name || "vmbr0", names.interfaces);
   const purposeOptions = INTERFACE_PURPOSE_OPTIONS.filter(
-    (opt) => (opt.value !== "ceph" && opt.value !== "zfs") || opt.value === storagePurpose,
+    (opt) => (opt.value !== "ceph" && opt.value !== "zfs") || storagePurposes.includes(opt.value),
   );
   const managementComboHint = purposeComboHint(managementBridge?.purposes ?? []);
   const vmTrafficHint = vmTrafficHintFor(node.network.bridges);
   const backupHint = backupHintFor(node.network.bridges);
   const corosyncHint = corosyncHintFor(node.network.bridges, nodeCount);
-  const storageHaHint = storageHaHintFor(node.network.bridges, storagePurpose);
+  // one per enabled mode: each needs its own nic on every node
+  const storageHaHints = storagePurposes.map((purpose) => storageHaHintFor(node.network.bridges, purpose));
   const storagePurposeMissingHint = (
     <p className="body-sm pc-field__hint">
       {nodeCount < 2
         ? "ceph and zfs replication need at least 2 nodes for real redundancy — add another node to unlock a cluster storage option here"
-        : storageHaMode === "none"
-          ? 'you chose "no ha / sync" above — pick ceph or zfs with replication there to unlock a matching nic purpose here'
-          : "ceph and zfs replication both need at least 1 disk beyond the boot disk on every node — add one in step 1, or the choice above falls back to \"no ha / sync\" until then"}
+        : !anyStorageChosen
+          ? "neither ceph nor zfs replication is ticked above — tick one there to unlock its nic purpose here"
+          : "ceph and zfs replication both need at least 1 disk beyond the boot disk on every node — add one in step 1 to unlock the storage you ticked"}
     </p>
   );
 
@@ -1333,7 +1439,7 @@ function NetworkStructureFields({
                   traffic
                 </p>
               )}
-              {storagePurpose === null && storagePurposeMissingHint}
+              {storagePurposes.length === 0 && storagePurposeMissingHint}
             </fieldset>
 
             {managementComboHint && (
@@ -1416,7 +1522,7 @@ function NetworkStructureFields({
                               </label>
                             );
                           })}
-                          {storagePurpose === null && storagePurposeMissingHint}
+                          {storagePurposes.length === 0 && storagePurposeMissingHint}
                         </fieldset>
 
                         {[comboHint, cephSpeedHint]
@@ -1537,7 +1643,7 @@ function NetworkStructureFields({
                       siblingVlanTags={siblingVlanTagsFor(node.network.bridges, count, iface.id, index)}
                       names={names}
                       purposeOptions={purposeOptions}
-                      storagePurpose={storagePurpose}
+                      storagePurposes={storagePurposes}
                       storagePurposeMissingHint={storagePurposeMissingHint}
                       nicSpeeds={nicSpeedsForInterface(iface.id, node.nics, node.network.bonds)}
                       onBridgeChange={onBridgeChange}
@@ -1563,7 +1669,7 @@ function NetworkStructureFields({
         );
       })}
 
-      {[vmTrafficHint, storageHaHint, backupHint, corosyncHint]
+      {[vmTrafficHint, ...storageHaHints, backupHint, corosyncHint]
         .filter((hint): hint is Hint => hint !== null)
         .map((hint, i) => (
           <div key={i} className={`pc-callout pc-callout--${hint.tone}`}>
@@ -1614,7 +1720,7 @@ function NetworkAddressFields({
   onBridgeChange: (bridgeId: string, patch: Partial<BridgeConfig>) => void;
 }) {
   const hostLabelError = validateHostLabel(node.network.hostLabel);
-  const cidrError = validateCidr(node.network.cidr) ?? conflicts.get(`${nodeIndex}#mgmt`) ?? null;
+  const cidrError = validateHostCidr(node.network.cidr) ?? conflicts.get(`${nodeIndex}#mgmt`) ?? null;
   const mgmtBridgeKey = bridgeKey(node.network.managementInterfaceId, 0);
   const managementBridge = node.network.bridges[mgmtBridgeKey];
   const managementBridgeName = managementBridge?.name || "vmbr0";
@@ -1701,8 +1807,8 @@ function NetworkFields({
   globalCidr,
   nodeCount,
   maxBonds,
-  storageHaMode,
-  storagePurpose,
+  anyStorageChosen,
+  storagePurposes,
   placeholders,
   conflicts,
   onChange,
@@ -1729,14 +1835,13 @@ function NetworkFields({
   // to worry about).
   nodeCount: number;
   maxBonds: number;
-  // the visitor's raw choice above, before any disk-availability fallback
-  // — only used to word the "why isn't ceph/zfs offered" hint correctly.
-  storageHaMode: StorageHaMode;
-  // the one storage purpose ("ceph" | "zfs" | null) the storage/ha
-  // decision at the top of this step currently allows — drives which of
-  // ceph/zfs (if either) is offered as a nic purpose, and is enforced
-  // below via storageHaHintFor.
-  storagePurpose: InterfacePurpose | null;
+  // whether ceph or zfs is ticked at all, before any disk-availability
+  // fallback — only words the "why isn't ceph/zfs offered" hint
+  anyStorageChosen: boolean;
+  // the storage purposes the cluster storage at the top of this step
+  // currently allows — each is offered as a nic purpose, and required on
+  // every node via storageHaHintFor
+  storagePurposes: InterfacePurpose[];
   // one cluster-wide pass of ip/network suggestions (see
   // buildPlaceholderTable) — keeps a shared-purpose bridge's placeholder
   // consistent with whatever an earlier node already committed for it.
@@ -1753,7 +1858,7 @@ function NetworkFields({
   onBridgeCountChange: (interfaceId: string, value: string) => void;
 }) {
   const hostLabelError = validateHostLabel(node.network.hostLabel);
-  const cidrError = validateCidr(node.network.cidr) ?? conflicts.get(`${nodeIndex}#mgmt`) ?? null;
+  const cidrError = validateHostCidr(node.network.cidr) ?? conflicts.get(`${nodeIndex}#mgmt`) ?? null;
   const interfaces = interfacesFor(node.nics, node.network.bonds);
   const names = collectNodeNames(node);
   const mgmtBridgeKey = bridgeKey(node.network.managementInterfaceId, 0);
@@ -1762,7 +1867,7 @@ function NetworkFields({
   const managementBridgeNameError =
     validateInterfaceName(managementBridgeName) ?? validateUniqueName(managementBridgeName, names.interfaces);
   const purposeOptions = INTERFACE_PURPOSE_OPTIONS.filter(
-    (opt) => (opt.value !== "ceph" && opt.value !== "zfs") || opt.value === storagePurpose,
+    (opt) => (opt.value !== "ceph" && opt.value !== "zfs") || storagePurposes.includes(opt.value),
   );
   const managementComboHint = purposeComboHint(managementBridge?.purposes ?? []);
   const managementCidrPlaceholder = deriveNodeCidr(globalCidr, nodeIndex) || "10.0.10.11/24";
@@ -1770,14 +1875,15 @@ function NetworkFields({
   const vmTrafficHint = vmTrafficHintFor(node.network.bridges);
   const backupHint = backupHintFor(node.network.bridges);
   const corosyncHint = corosyncHintFor(node.network.bridges, nodeCount);
-  const storageHaHint = storageHaHintFor(node.network.bridges, storagePurpose);
+  // one per enabled mode: each needs its own nic on every node
+  const storageHaHints = storagePurposes.map((purpose) => storageHaHintFor(node.network.bridges, purpose));
   const storagePurposeMissingHint = (
     <p className="body-sm pc-field__hint">
       {nodeCount < 2
         ? "ceph and zfs replication need at least 2 nodes for real redundancy — add another node to unlock a cluster storage option here"
-        : storageHaMode === "none"
-          ? 'you chose "no ha / sync" above — pick ceph or zfs with replication there to unlock a matching nic purpose here'
-          : "ceph and zfs replication both need at least 1 disk beyond the boot disk on every node — add one in step 1, or the choice above falls back to \"no ha / sync\" until then"}
+        : !anyStorageChosen
+          ? "neither ceph nor zfs replication is ticked above — tick one there to unlock its nic purpose here"
+          : "ceph and zfs replication both need at least 1 disk beyond the boot disk on every node — add one in step 1 to unlock the storage you ticked"}
     </p>
   );
 
@@ -1898,7 +2004,7 @@ function NetworkFields({
                   traffic
                 </p>
               )}
-              {storagePurpose === null && storagePurposeMissingHint}
+              {storagePurposes.length === 0 && storagePurposeMissingHint}
             </fieldset>
 
             {managementComboHint && (
@@ -1985,7 +2091,7 @@ function NetworkFields({
                               </label>
                             );
                           })}
-                          {storagePurpose === null && storagePurposeMissingHint}
+                          {storagePurposes.length === 0 && storagePurposeMissingHint}
                         </fieldset>
 
                         {[comboHint, cephSpeedHint]
@@ -2100,7 +2206,7 @@ function NetworkFields({
                       siblingVlanTags={siblingVlanTagsFor(node.network.bridges, count, iface.id, index)}
                       names={names}
                       purposeOptions={purposeOptions}
-                      storagePurpose={storagePurpose}
+                      storagePurposes={storagePurposes}
                       storagePurposeMissingHint={storagePurposeMissingHint}
                       nicSpeeds={nicSpeedsForInterface(iface.id, node.nics, node.network.bonds)}
                       onBridgeChange={onBridgeChange}
@@ -2120,7 +2226,7 @@ function NetworkFields({
         );
       })}
 
-      {[vmTrafficHint, storageHaHint, backupHint, corosyncHint]
+      {[vmTrafficHint, ...storageHaHints, backupHint, corosyncHint]
         .filter((hint): hint is Hint => hint !== null)
         .map((hint, i) => (
           <div key={i} className={`pc-callout pc-callout--${hint.tone}`}>
@@ -2131,6 +2237,45 @@ function NetworkFields({
           </div>
         ))}
     </>
+  );
+}
+
+// A pool name / storage id field. Step 3 asks for four of these and they
+// all answer to the same rules (see validatePoolName), so the validation
+// and the "don't go red before it's been touched" behavior live here
+// rather than being repeated per field.
+function PoolNameField({
+  id,
+  label,
+  hint,
+  value,
+  onChange,
+}: {
+  id: string;
+  label: string;
+  hint: string;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  const error = validatePoolName(value);
+  return (
+    <div className={`pc-field ${error ? "pc-field--error" : ""}`}>
+      <label className="label pc-field__label" htmlFor={id}>
+        {label}
+        <span className="pc-field__required"> *</span>
+      </label>
+      <div className="pc-field__control">
+        <span className="code pc-field__bracket">$</span>
+        <input
+          id={id}
+          className="pc-field__input code"
+          type="text"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+        />
+      </div>
+      <span className="body-sm pc-field__hint">{error ?? hint}</span>
+    </div>
   );
 }
 
@@ -2145,7 +2290,9 @@ export default function Setup() {
   const [nodes, setNodes] = useState<NodeInfo[]>([defaultNode(0, "10.0.10.0/24")]);
   const [identicalHardware, setIdenticalHardware] = useState(false);
   const [identicalNetwork, setIdenticalNetwork] = useState(false);
-  const [storageHaMode, setStorageHaMode] = useState<StorageHaMode>("ceph");
+  const [clusterStorage, setClusterStorage] = useState<ClusterStorage>({ ceph: true, zfs: false });
+  const [storage, setStorage] = useState<StoragePlan>(defaultStoragePlan);
+  const [identicalStorage, setIdenticalStorage] = useState(false);
   // gates the save effect below so it never fires with the initial default
   // state before the restore attempt (which may replace that state) has
   // actually run — otherwise a freshly-loaded save could get clobbered by
@@ -2172,7 +2319,9 @@ export default function Setup() {
       setNodes(saved.nodes);
       setIdenticalHardware(saved.identicalHardware);
       setIdenticalNetwork(saved.identicalNetwork);
-      setStorageHaMode(saved.storageHaMode);
+      setClusterStorage(saved.clusterStorage);
+      setStorage(saved.storage);
+      setIdenticalStorage(saved.identicalStorage);
     }
     setHydrated(true);
   }, []);
@@ -2195,7 +2344,9 @@ export default function Setup() {
           nodes,
           identicalHardware,
           identicalNetwork,
-          storageHaMode,
+          clusterStorage,
+          storage,
+          identicalStorage,
         };
         window.localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
       } catch {
@@ -2214,7 +2365,9 @@ export default function Setup() {
     nodes,
     identicalHardware,
     identicalNetwork,
-    storageHaMode,
+    clusterStorage,
+    storage,
+    identicalStorage,
   ]);
 
   const quorumHint = useMemo(() => quorumHintFor(nodes.length), [nodes.length]);
@@ -2236,12 +2389,70 @@ export default function Setup() {
   const addressConflicts = useMemo(() => buildAddressConflicts(nodes), [nodes]);
   const minDisks = useMemo(() => minAdditionalDisks(nodes), [nodes]);
   const clusterStorageAvailable = minDisks >= 1;
-  const effectiveMode = useMemo(() => effectiveStorageHaMode(storageHaMode, nodes), [storageHaMode, nodes]);
+  // what's actually in effect given the nodes and disks (see
+  // effectiveClusterStorage) — everything below reads these, never the
+  // raw choice, except the checkboxes themselves
+  const activeStorage = useMemo(() => effectiveClusterStorage(clusterStorage, nodes), [clusterStorage, nodes]);
+  // keyed on the two booleans, not the object: effectiveClusterStorage
+  // builds a new object whenever it clamps, and an effect below depends on
+  // these — a new array on every node edit re-ran it in a render loop
+  const storageModes = useMemo(
+    () => enabledStorageModes({ ceph: activeStorage.ceph, zfs: activeStorage.zfs }),
+    [activeStorage.ceph, activeStorage.zfs],
+  );
+  // every node's disks with the role they actually play under those modes
+  const planNodes = useMemo(() => withEffectiveDiskRoles(nodes, storageModes), [nodes, storageModes]);
   // nodes that couldn't carry ceph at a sane speed — drives the caveat on
   // the ceph option below. computed whatever the current choice is, so the
   // warning is visible before you pick it rather than after.
   const slowForCeph = useMemo(() => nodesWithoutFastNic(nodes), [nodes]);
-  const storagePurpose = activeStoragePurpose(effectiveMode);
+  // nodes whose zfs pool could only be a one-disk stripe — the zfs option's
+  // caveat, shown before it's picked for the same reason as slowForCeph.
+  // ceph takes a disk per node first when both are on, so zfs gets what's left
+  const stripeOnlyForZfs = useMemo(
+    () => nodesWithoutZfsRedundancy(nodes, clusterStorage.ceph ? 1 : 0),
+    [nodes, clusterStorage.ceph],
+  );
+  const storagePurposes = useMemo(
+    () => activeStoragePurposes({ ceph: activeStorage.ceph, zfs: activeStorage.zfs }),
+    [activeStorage.ceph, activeStorage.zfs],
+  );
+
+  // ── step 3 derivations ────────────────────────────────────────────────
+  // the zfs layouts every node can build, and the one in effect — the
+  // picker lists only those, and everything below reads the effective one
+  const zfsMembers = useMemo(() => minPoolMembers(planNodes), [planNodes]);
+  const zfsChoices = raidLevelChoices(zfsMembers);
+  const raidLevel = effectiveRaidLevel(storage.zfs.raidLevel, zfsMembers) ?? storage.zfs.raidLevel;
+  // the replica counts in effect for this many nodes — everything below
+  // reads these, never storage.ceph directly (see effectiveCephPlan)
+  const ceph = useMemo(() => effectiveCephPlan(storage.ceph, nodes.length), [storage.ceph, nodes.length]);
+  const replicas = Number(ceph.replicas);
+  const cephReplicaWarning = useMemo(
+    () => cephReplicaHint(nodes.length, replicas),
+    [nodes.length, replicas],
+  );
+  // one membership check per enabled mode — each needs a disk on every node
+  const poolMembership = useMemo(
+    () => storageModes.map((mode) => poolMembershipHint(planNodes, mode)),
+    [planNodes, storageModes],
+  );
+  const cephDiskTypes = useMemo(
+    () => (activeStorage.ceph ? cephDiskTypeHint(planNodes) : null),
+    [planNodes, activeStorage.ceph],
+  );
+  const anyLocalDisks = useMemo(() => hasLocalDisks(planNodes), [planNodes]);
+  const replicationHint = useMemo(
+    () => (activeStorage.zfs ? replicationWindowHint(Number(storage.zfs.replicationMinutes) || 0) : null),
+    [activeStorage.zfs, storage.zfs.replicationMinutes],
+  );
+  // capacity is quoted per node for zfs (each node builds its own pool)
+  // and once for ceph (there is only one pool, spread across the cluster).
+  const cephCapacityGb = useMemo(() => cephUsableGb(planNodes, replicas), [planNodes, replicas]);
+  const cephSurvivesNodeLossGb = useMemo(
+    () => (replicas > 0 ? cephRawWithoutLargestNodeGb(planNodes) / replicas : 0),
+    [planNodes, replicas],
+  );
 
   // whenever the node count or the effective storage/ha decision changes
   // (including zfs silently losing its disks), drop any bridge purpose
@@ -2252,10 +2463,48 @@ export default function Setup() {
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     if (!hydrated) return;
-    const disallowed = (["ceph", "zfs"] as InterfacePurpose[]).filter((p) => p !== storagePurpose);
+    const disallowed = (["ceph", "zfs"] as InterfacePurpose[]).filter((p) => !storagePurposes.includes(p));
     setNodes((prev) => withoutPurposes(prev, disallowed));
-  }, [hydrated, storagePurpose]);
+  }, [hydrated, storagePurposes]);
+  // disk roles need no such effect: they're read through
+  // withEffectiveDiskRoles, so a role that stops being offered simply
+  // stops applying, and comes back if it's offered again
   /* eslint-enable react-hooks/set-state-in-effect */
+
+  // ── the gate ──────────────────────────────────────────────────────────
+  // everything blocking this step and the ones before it, from the live
+  // form — the same checks the preview pages apply to the saved state
+  const blocking = useMemo(
+    () =>
+      problemsUpTo(currentStep, {
+        nodeCount,
+        nodes,
+        hostnameSuffix,
+        globalCidr,
+        gateway,
+        homelabVlan,
+        clusterStorage,
+        storage,
+      }),
+    [currentStep, nodeCount, nodes, hostnameSuffix, globalCidr, gateway, homelabVlan, clusterStorage, storage],
+  );
+  // set by a blocked "preview": from then on every field shows its error,
+  // and the list below says what's left. cleared on a step switch, so
+  // the next step starts without red it hasn't earned yet.
+  const [revealErrors, setRevealErrors] = useState(false);
+  /* eslint-disable react-hooks/set-state-in-effect */
+  useEffect(() => {
+    setRevealErrors(false);
+  }, [currentStep]);
+  /* eslint-enable react-hooks/set-state-in-effect */
+
+  function tryPreview(step: WizardStepId) {
+    if (blocking.length > 0) {
+      setRevealErrors(true);
+      return;
+    }
+    router.push(`/setup/preview/${step}`);
+  }
 
   // every step switch (next/back, or the hydration restore landing on
   // whatever step was left off at) should start the visitor at the top of
@@ -2314,7 +2563,10 @@ export default function Setup() {
         // node name feeds the hostname label default — keep it in sync
         // unless the visitor already typed a label of their own (in
         // which case leave their edit alone).
-        if (patch.name && node.network.hostLabel === node.name) {
+        // `!== undefined`, not truthiness: clearing the field to retype
+        // a name passes "" — skipping that broke the sync for good, since
+        // the label and the name never matched again afterwards.
+        if (patch.name !== undefined && node.network.hostLabel === node.name) {
           next.network = { ...next.network, hostLabel: patch.name };
         }
         return next;
@@ -2331,7 +2583,7 @@ export default function Setup() {
         return {
           ...node,
           nicCount: value,
-          nics: resizeArray(node.nics, clamped, (idx) => ({ speed: "1gbe" as NicSpeed, name: defaultNicName(idx) })),
+          nics: resizeArray(node.nics, clamped, defaultNic),
           network: resyncNetworkForNics(node.network, clamped),
         };
       }),
@@ -2376,6 +2628,30 @@ export default function Setup() {
     );
   }
 
+  // step 3's only per-node edit. under "identical storage" the role is
+  // written to the disk at the same position on every node, which is the
+  // only correspondence the nodes reliably share (see applyStorageRoles).
+  function updateDiskRole(nodeIndex: number, diskIndex: number, role: DiskRole) {
+    setNodes((prev) =>
+      prev.map((node, i) =>
+        !identicalStorage && i !== nodeIndex
+          ? node
+          : {
+              ...node,
+              additionalDisks: node.additionalDisks.map((d, j) => (j === diskIndex ? { ...d, role } : d)),
+            },
+      ),
+    );
+  }
+
+  function handleIdenticalStorageChange(next: boolean) {
+    setIdenticalStorage(next);
+    // turning it on adopts node 1's plan, the same way the network step
+    // adopts node 1's structure — otherwise the checkbox would claim the
+    // nodes match while they visibly don't.
+    if (next && nodes.length > 0) setNodes((prev) => applyStorageRoles(prev, prev[0].additionalDisks));
+  }
+
   function updateAllNodesHardware(patch: Partial<HardwareSpec>) {
     setNodes((prev) => prev.map((node) => ({ ...node, ...patch })));
   }
@@ -2388,7 +2664,7 @@ export default function Setup() {
         return {
           ...node,
           nicCount: value,
-          nics: resizeArray(node.nics, clamped, (idx) => ({ speed: "1gbe" as NicSpeed, name: defaultNicName(idx) })),
+          nics: resizeArray(node.nics, clamped, defaultNic),
           network: resyncNetworkForNics(node.network, clamped),
         };
       }),
@@ -2629,9 +2905,9 @@ export default function Setup() {
 
   const nodeCountError = validateIntRange(nodeCount, 1, 16, { required: true });
   const hostnameSuffixError = validateHostnameSuffix(hostnameSuffix);
-  const globalCidrError = validateCidr(globalCidr);
+  const globalCidrError = required(globalCidr, validateCidr);
   const homelabVlanError = validateOptionalVlanTag(homelabVlan);
-  const gatewayError = validateIp(gateway);
+  const gatewayError = required(gateway, validateIp);
 
   return (
     <div className="pc-root flex min-h-full flex-col">
@@ -2668,6 +2944,7 @@ export default function Setup() {
             </div>
           </div>
 
+          <RevealErrorsContext.Provider value={revealErrors}>
           {currentStep === "hardware" && (
             <div className="pc-stepflow__card">
               <p className="meta pc-stepflow__meta"># step 1 of 5</p>
@@ -2739,7 +3016,7 @@ export default function Setup() {
                 )}
 
                 {nodes.map((node, i) => {
-                  const nameError = validateHostLabel(node.name);
+                  const nameError = required(node.name, validateHostLabel);
 
                   return (
                     <div
@@ -2794,6 +3071,7 @@ export default function Setup() {
                 )}
               </div>
 
+              {revealErrors && <ProblemList problems={blocking} step={currentStep} />}
               <div className="pc-stepflow__nav">
                 <Link href="/" className="pc-btn pc-btn--ghost">
                   ← back to overview
@@ -2801,7 +3079,7 @@ export default function Setup() {
                 <button
                   type="button"
                   className="pc-btn pc-btn--primary"
-                  onClick={() => router.push("/setup/preview/hardware")}
+                  onClick={() => tryPreview("hardware")}
                 >
                   <span className="pc-btn__bracket">[</span>
                   preview
@@ -2915,44 +3193,78 @@ export default function Setup() {
 
                 {nodes.length > 1 && (
                   <fieldset className="pc-radio-group" style={{ border: 0, margin: 0, padding: 0 }}>
-                    <legend className="label pc-radio-group__legend">cluster storage</legend>
-                    {STORAGE_HA_OPTIONS.filter((opt) => opt.value === "none" || clusterStorageAvailable).map((opt) => {
-                      // only ceph gets a speed caveat here: zfs replication
-                      // ships a scheduled snapshot stream and tolerates a
-                      // slow link by just taking longer, where ceph puts the
-                      // link in the path of every synchronous write.
-                      const flagSlow = opt.value === "ceph" && slowForCeph.length > 0;
-                      return (
-                        <label key={opt.value} className="pc-radio">
-                          <input
-                            type="radio"
-                            name="storage-ha-mode"
-                            checked={effectiveMode === opt.value}
-                            onChange={() => setStorageHaMode(opt.value)}
-                          />
-                          <span className="pc-radio__box" />
-                          <span>
-                            <span className="code pc-radio__label">
-                              {opt.label}
-                              {flagSlow && <span className="pc-radio__warnmark">⚠</span>}
-                            </span>
-                            <span className="body-sm pc-checkbox__hint">{opt.hint}</span>
-                            {flagSlow && (
-                              <span className="body-sm pc-radio__warntext">
-                                ⚠ no 10 gbe (or faster) nic on{" "}
-                                {slowForCeph.length === nodes.length
-                                  ? "any node"
-                                  : slowForCeph.map((n) => n.network.hostLabel || n.name).join(", ")}
-                                . ceph acknowledges a write only once the other nodes have it, so the
-                                slowest node&apos;s link sets the disk latency every vm in the cluster
-                                sees — add a 10 gbe nic in step 1, or choose zfs with replication
-                                instead.
+                    <legend className="label pc-radio-group__legend">cluster storage (tick any, or none)</legend>
+                    {clusterStorageAvailable &&
+                      CLUSTER_STORAGE_OPTIONS.map((opt) => {
+                        const other: StorageMode = opt.value === "ceph" ? "zfs" : "ceph";
+                        // ceph takes each osd disk whole, so running both needs
+                        // a second spare disk on every node for zfs
+                        const blockedByOther = !activeStorage[opt.value] && activeStorage[other] && minDisks < 2;
+                        // only ceph gets a speed caveat: zfs replication ships a
+                        // scheduled snapshot stream and tolerates a slow link by
+                        // taking longer, where ceph puts the link in the path of
+                        // every synchronous write.
+                        const flagSlow = opt.value === "ceph" && slowForCeph.length > 0;
+                        // zfs's own caveat: fewer than two disks left for it means
+                        // a single-disk stripe, with nothing to fail over to
+                        // inside the node.
+                        const flagStripe = opt.value === "zfs" && stripeOnlyForZfs.length > 0;
+                        return (
+                          <label key={opt.value} className="pc-checkbox">
+                            <input
+                              type="checkbox"
+                              checked={activeStorage[opt.value]}
+                              disabled={blockedByOther}
+                              onChange={(e) => setClusterStorage((cs) => ({ ...cs, [opt.value]: e.target.checked }))}
+                            />
+                            <span className="pc-checkbox__box" />
+                            <span>
+                              <span className="code pc-checkbox__label">
+                                {opt.label}
+                                {(flagSlow || flagStripe) && <span className="pc-radio__warnmark">⚠</span>}
                               </span>
-                            )}
-                          </span>
-                        </label>
-                      );
-                    })}
+                              <span className="body-sm pc-checkbox__hint">{opt.hint}</span>
+                              {blockedByOther && (
+                                <span className="body-sm pc-checkbox__hint">
+                                  needs a second disk beyond boot on every node — {other} takes one, and ceph and
+                                  zfs can&apos;t share a disk. add one in step 1 to run both.
+                                </span>
+                              )}
+                              {flagSlow && (
+                                <span className="body-sm pc-radio__warntext">
+                                  ⚠ no 10 gbe (or faster) nic on{" "}
+                                  {slowForCeph.length === nodes.length
+                                    ? "any node"
+                                    : slowForCeph.map((n) => n.network.hostLabel || n.name).join(", ")}
+                                  . ceph acknowledges a write only once the other nodes have it, so the
+                                  slowest node&apos;s link sets the disk latency every vm in the cluster
+                                  sees — add a 10 gbe nic in step 1, or use zfs with replication
+                                  instead.
+                                </span>
+                              )}
+                              {flagStripe && (
+                                <span className="body-sm pc-radio__warntext">
+                                  ⚠ fewer than two disks left for zfs on{" "}
+                                  {stripeOnlyForZfs.length === nodes.length
+                                    ? "every node"
+                                    : stripeOnlyForZfs.map((n) => n.network.hostLabel || n.name).join(", ")}
+                                  {clusterStorage.ceph ? " once ceph takes one" : ""}, so each zfs pool there
+                                  can only be a single-disk stripe — no redundancy within the node. one failed
+                                  disk loses that node&apos;s whole pool, and its guests come back from another
+                                  node only as of the last replication run. add a disk per node in step 1 to
+                                  mirror them.
+                                </span>
+                              )}
+                            </span>
+                          </label>
+                        );
+                      })}
+                    {clusterStorageAvailable && storageModes.length === 0 && (
+                      <p className="body-sm pc-field__hint">
+                        neither ticked: each node&apos;s storage is its own island — simplest, but a vm
+                        doesn&apos;t survive its node going down.
+                      </p>
+                    )}
                     {!clusterStorageAvailable && (
                       <p className="body-sm pc-field__hint">
                         ceph and zfs replication both need at least 1 disk beyond the boot disk on every node — your worst-equipped node currently has {minDisks}, so it sets the limit for the whole cluster. add one in step 1 to unlock either option here
@@ -2962,7 +3274,7 @@ export default function Setup() {
                         end up running, which this wizard can't know yet — so
                         rather than restate a snapshot of them, point at the
                         source and let it stay current. */}
-                    {effectiveMode === "ceph" && (
+                    {activeStorage.ceph && (
                       <div className="pc-callout pc-callout--info">
                         <span className="code pc-callout__glyph">#</span>
                         <div className="pc-callout__body">
@@ -3015,8 +3327,8 @@ export default function Setup() {
                       node={nodes[0]}
                       nodeCount={nodes.length}
                       maxBonds={maxBonds}
-                      storageHaMode={storageHaMode}
-                      storagePurpose={storagePurpose}
+                      anyStorageChosen={clusterStorage.ceph || clusterStorage.zfs}
+                      storagePurposes={storagePurposes}
                       globalCidr={globalCidr}
                       lanPrefix={lanPrefix}
                       placeholders={networkPlaceholders}
@@ -3062,8 +3374,8 @@ export default function Setup() {
                         globalCidr={globalCidr}
                         nodeCount={nodes.length}
                         maxBonds={maxBonds}
-                        storageHaMode={storageHaMode}
-                        storagePurpose={storagePurpose}
+                        anyStorageChosen={clusterStorage.ceph || clusterStorage.zfs}
+                        storagePurposes={storagePurposes}
                         placeholders={networkPlaceholders}
                         conflicts={addressConflicts}
                         onChange={(patch) => updateNodeNetwork(i, patch)}
@@ -3079,6 +3391,7 @@ export default function Setup() {
                 ))}
               </div>
 
+              {revealErrors && <ProblemList problems={blocking} step={currentStep} />}
               <div className="pc-stepflow__nav">
                 <button type="button" className="pc-btn" onClick={() => setCurrentStep("hardware")}>
                   <span className="pc-btn__bracket">[</span>
@@ -3088,7 +3401,7 @@ export default function Setup() {
                 <button
                   type="button"
                   className="pc-btn pc-btn--primary"
-                  onClick={() => router.push("/setup/preview/network")}
+                  onClick={() => tryPreview("network")}
                 >
                   <span className="pc-btn__bracket">[</span>
                   preview
@@ -3098,8 +3411,446 @@ export default function Setup() {
             </div>
           )}
 
+          {currentStep === "storage" && (
+            <div className="pc-stepflow__card">
+              <p className="meta pc-stepflow__meta"># step 3 of 5</p>
+              <h2 className="h2 pc-stepflow__title">storage</h2>
+              <p className="body pc-stepflow__intro">
+                Step 1 asked what disks each node has. This decides what
+                they&apos;re <em>for</em> — which ones join the cluster&apos;s
+                shared storage, which stay local to their node, and how each
+                pool is laid out.
+              </p>
+
+              <div className="pc-stepflow__fields">
+                {storageModes.length === 0 && (
+                  <div className="pc-callout pc-callout--info">
+                    <span className="code pc-callout__glyph">#</span>
+                    <div className="pc-callout__body">
+                      <p className="body pc-callout__text">
+                        Neither ceph nor zfs replication is on, so there&apos;s
+                        no cluster-wide pool to build — every disk below is
+                        either this node&apos;s own storage or left alone.
+                        Tick one in step 2 to plan a shared pool here
+                        instead.
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                {nodes.length > 1 && (
+                  <label className="pc-checkbox">
+                    <input
+                      type="checkbox"
+                      checked={identicalStorage}
+                      onChange={(e) => handleIdenticalStorageChange(e.target.checked)}
+                    />
+                    <span className="pc-checkbox__box" />
+                    <span>
+                      <span className="code pc-checkbox__label">identical disk layout across all nodes</span>
+                      <span className="body-sm pc-checkbox__hint">
+                        the disk in the same slot plays the same role on every node — which is what ceph and zfs
+                        replication both assume
+                      </span>
+                    </span>
+                  </label>
+                )}
+
+                {/* per-node disk roles */}
+                {nodes.map((node, nodeIndex) => {
+                  if (identicalStorage && nodeIndex > 0) return null;
+                  // the same node with its disks' effective roles — what the
+                  // radios show and every figure below is computed from
+                  const planNode = planNodes[nodeIndex];
+                  const zfsDisks = disksWithRole(planNode, "zfs");
+                  const layoutHint = activeStorage.zfs ? zfsLayoutHint(zfsDisks.length, raidLevel) : null;
+                  const sizeHint = activeStorage.zfs ? mixedDiskSizeHint(zfsDisks, raidLevel) : null;
+                  const soleMode = soleDiskMode(storageModes, node.additionalDisks.length);
+
+                  return (
+                    <div
+                      key={node.name + nodeIndex}
+                      className="flex flex-col border border-border bg-surface-100 p-5"
+                      style={{ gap: "var(--space-4)" }}
+                    >
+                      <p className="label text-ink-muted">
+                        {identicalStorage
+                          ? "every node's disks"
+                          : `node ${String(nodeIndex + 1).padStart(2, "0")} — ${node.name}`}
+                      </p>
+
+                      {/* same headline as the data disks below, so the boot
+                          disk reads as one of this node's disks — the box
+                          under it then only has to say why it has no role
+                          to pick, instead of repeating its name and size. */}
+                      <div className="pc-radio-group">
+                        <p className="label pc-radio-group__legend">
+                          {node.bootDiskName || "boot"} — {node.bootDiskSizeGb || "?"} gb {node.bootDiskType}
+                        </p>
+                        <div className="pc-diskline">
+                          <span className="body-sm pc-diskline__meta">
+                            the proxmox installer puts the os here, plus the small &ldquo;local&rdquo; storage for
+                            isos and backups — so it takes no role below
+                          </span>
+                          <span className="meta pc-diskline__locked">proxmox owns this one</span>
+                        </div>
+                      </div>
+
+                      {node.additionalDisks.length === 0 ? (
+                        <p className="body-sm text-ink-muted">
+                          no disks beyond boot on this node — add some in step 1 to have anything to plan here.
+                        </p>
+                      ) : (
+                        node.additionalDisks.map((disk, diskIndex) => (
+                          <fieldset
+                            key={diskIndex}
+                            className="pc-radio-group"
+                            style={{ border: 0, margin: 0, padding: 0 }}
+                          >
+                            <legend className="label pc-radio-group__legend">
+                              {disk.name || `disk ${diskIndex + 1}`} — {disk.sizeGb || "?"} gb {disk.type}
+                            </legend>
+                            {diskRoleOptions(storageModes, node.additionalDisks.length).map((opt) => (
+                              <label key={opt.value} className="pc-radio">
+                                <input
+                                  type="radio"
+                                  name={`diskrole-${nodeIndex}-${diskIndex}`}
+                                  checked={planNode.additionalDisks[diskIndex].role === opt.value}
+                                  onChange={() => updateDiskRole(nodeIndex, diskIndex, opt.value)}
+                                />
+                                <span className="pc-radio__box" />
+                                <span>
+                                  <span className="code pc-radio__label">{opt.label}</span>
+                                  <span className="body-sm pc-checkbox__hint">{opt.hint}</span>
+                                </span>
+                              </label>
+                            ))}
+                            {soleMode && (
+                              <p className="body-sm pc-field__hint">
+                                it&apos;s this node&apos;s only disk beyond boot, so it has to join the pool — left
+                                out, the node would store nothing for{" "}
+                                {soleMode === "ceph" ? "ceph" : "zfs replication"}. add a second disk in step 1
+                                to keep one for local storage.
+                              </p>
+                            )}
+                          </fieldset>
+                        ))
+                      )}
+
+                      {activeStorage.zfs && zfsDisks.length > 0 && (
+                        <div className="pc-summary">
+                          <div className="pc-summary__cell">
+                            <span className="label pc-summary__key">zfs pool members</span>
+                            <span className="code pc-summary__val">{zfsDisks.length}</span>
+                          </div>
+                          <div className="pc-summary__cell">
+                            <span className="label pc-summary__key">raw</span>
+                            <span className="code pc-summary__val pc-summary__val--sm">
+                              {formatGb(totalGb(zfsDisks))}
+                            </span>
+                          </div>
+                          <div className="pc-summary__cell">
+                            <span className="label pc-summary__key">usable</span>
+                            <span className="code pc-summary__val pc-summary__val--sm">
+                              {formatGb(zfsUsableGb(zfsDisks, raidLevel))}
+                            </span>
+                          </div>
+                        </div>
+                      )}
+
+                      {[layoutHint, sizeHint]
+                        .filter((hint): hint is Hint => hint !== null)
+                        .map((hint, i) => (
+                          <div key={i} className={`pc-callout pc-callout--${hint.tone}`}>
+                            <span className="code pc-callout__glyph">{hint.glyph}</span>
+                            <div className="pc-callout__body">
+                              <p className="body-sm pc-callout__text">{hint.text}</p>
+                            </div>
+                          </div>
+                        ))}
+                    </div>
+                  );
+                })}
+
+                {[...poolMembership, cephDiskTypes]
+                  .filter((hint): hint is Hint => hint !== null)
+                  .map((hint, i) => (
+                    <div key={i} className={`pc-callout pc-callout--${hint.tone}`}>
+                      <span className="code pc-callout__glyph">{hint.glyph}</span>
+                      <div className="pc-callout__body">
+                        <p className="body-sm pc-callout__text">{hint.text}</p>
+                      </div>
+                    </div>
+                  ))}
+
+                {/* ceph pool */}
+                {activeStorage.ceph && (
+                  <div
+                    className="flex flex-col border border-border bg-surface-100 p-5"
+                    style={{ gap: "var(--space-5)" }}
+                  >
+                    <p className="label text-ink-muted">the ceph pool</p>
+
+                    <PoolNameField
+                      id="ceph-pool-name"
+                      label="pool name"
+                      hint="the proxmox storage id your vm disks will live on"
+                      value={storage.ceph.poolName}
+                      onChange={(poolName) => setStorage((p) => ({ ...p, ceph: { ...p.ceph, poolName } }))}
+                    />
+
+                    {/* pickers rather than free number fields: only values
+                        ceph can actually honor are listed, so an
+                        unplaceable replica count or a min_size above size
+                        can't be entered at all (see replicaChoices). */}
+                    <div className="pc-field">
+                      <label className="label pc-field__label" htmlFor="ceph-replicas">
+                        replicas (size)
+                        <span className="pc-field__required"> *</span>
+                      </label>
+                      <div className="pc-field__control">
+                        <select
+                          id="ceph-replicas"
+                          className="pc-field__input code"
+                          value={ceph.replicas}
+                          onChange={(e) =>
+                            setStorage((p) => ({ ...p, ceph: { ...p.ceph, replicas: e.target.value } }))
+                          }
+                        >
+                          {replicaChoices(nodes.length).map((n) => (
+                            <option key={n} value={String(n)}>
+                              {n}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <span className="body-sm pc-field__hint">
+                        copies of every object, one per node — at least 2, at most{" "}
+                        {Math.min(nodes.length, MAX_CEPH_REPLICAS)} with {nodes.length} nodes. 3 is ceph&apos;s default.
+                      </span>
+                    </div>
+
+                    <div className="pc-field">
+                      <label className="label pc-field__label" htmlFor="ceph-min-replicas">
+                        min replicas (min_size)
+                        <span className="pc-field__required"> *</span>
+                      </label>
+                      <div className="pc-field__control">
+                        <select
+                          id="ceph-min-replicas"
+                          className="pc-field__input code"
+                          // shows the effective value: min_size never reads
+                          // above size, even while the stored choice is higher
+                          value={ceph.minReplicas}
+                          onChange={(e) =>
+                            setStorage((p) => ({ ...p, ceph: { ...p.ceph, minReplicas: e.target.value } }))
+                          }
+                        >
+                          {minReplicaChoices(replicas).map((n) => (
+                            <option key={n} value={String(n)}>
+                              {n}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <span className="body-sm pc-field__hint">
+                        how many copies must be writable before the pool accepts a write — from 2 (never 1, which
+                        accepts writes that exist in one place only) up to the replica count
+                      </span>
+                    </div>
+
+                    <div className="pc-summary">
+                      <div className="pc-summary__cell">
+                        <span className="label pc-summary__key">raw across cluster</span>
+                        <span className="code pc-summary__val pc-summary__val--sm">
+                          {formatGb(planNodes.reduce((sum, n) => sum + totalGb(disksWithRole(n, "ceph")), 0))}
+                        </span>
+                      </div>
+                      <div className="pc-summary__cell">
+                        <span className="label pc-summary__key">usable at {replicas || "?"}×</span>
+                        <span className="code pc-summary__val pc-summary__val--sm">{formatGb(cephCapacityGb)}</span>
+                      </div>
+                      <div className="pc-summary__cell">
+                        <span className="label pc-summary__key">with one node down</span>
+                        <span className="code pc-summary__val pc-summary__val--sm">
+                          {formatGb(cephSurvivesNodeLossGb)}
+                        </span>
+                      </div>
+                    </div>
+                    <p className="body-sm text-ink-muted">
+                      Raw capacity before compression and before ceph&apos;s
+                      full ratio, which starts refusing writes around 95%.
+                      Plan to stay under the &ldquo;with one node down&rdquo;
+                      figure — that&apos;s what still fits while a node is
+                      being rebuilt.
+                    </p>
+
+                    {cephReplicaWarning && (
+                      <div className={`pc-callout pc-callout--${cephReplicaWarning.tone}`}>
+                        <span className="code pc-callout__glyph">{cephReplicaWarning.glyph}</span>
+                        <div className="pc-callout__body">
+                          <p className="body-sm pc-callout__text">{cephReplicaWarning.text}</p>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* zfs pool */}
+                {activeStorage.zfs && (
+                  <div
+                    className="flex flex-col border border-border bg-surface-100 p-5"
+                    style={{ gap: "var(--space-5)" }}
+                  >
+                    <p className="label text-ink-muted">the replicated zfs pool</p>
+
+                    <PoolNameField
+                      id="zfs-pool-name"
+                      label="pool name"
+                      hint="the same pool name is created on every node — replication pairs them up by name"
+                      value={storage.zfs.poolName}
+                      onChange={(poolName) => setStorage((p) => ({ ...p, zfs: { ...p.zfs, poolName } }))}
+                    />
+
+                    {/* only layouts every node can build; with no pool disks
+                        anywhere there's nothing to arrange, and the pool
+                        membership warning above already says why */}
+                    {zfsChoices.length > 0 && (
+                      <fieldset className="pc-radio-group" style={{ border: 0, margin: 0, padding: 0 }}>
+                        <legend className="label pc-radio-group__legend">how the pool&apos;s disks are arranged</legend>
+                        {ZFS_RAID_OPTIONS.filter((opt) => zfsChoices.includes(opt.value)).map((opt) => (
+                          <label key={opt.value} className="pc-radio">
+                            <input
+                              type="radio"
+                              name="zfs-raid-level"
+                              checked={raidLevel === opt.value}
+                              onChange={() => setStorage((p) => ({ ...p, zfs: { ...p.zfs, raidLevel: opt.value } }))}
+                            />
+                            <span className="pc-radio__box" />
+                            <span>
+                              <span className="code pc-radio__label">
+                                {opt.label}
+                                <span className="pc-radio__aside"> — {opt.minDisks}+ disks</span>
+                              </span>
+                              <span className="body-sm pc-checkbox__hint">{opt.hint}</span>
+                            </span>
+                          </label>
+                        ))}
+                        {zfsChoices.length < ZFS_RAID_OPTIONS.length && (
+                          <p className="body-sm pc-field__hint">
+                            with {zfsMembers} pool {zfsMembers === 1 ? "disk" : "disks"} on the thinnest node, these are
+                            the layouts every node can build — add disks in step 1 for the others.
+                          </p>
+                        )}
+                      </fieldset>
+                    )}
+
+                    <div className="pc-field">
+                      <label className="label pc-field__label" htmlFor="zfs-replication-minutes">
+                        replicate every
+                        <span className="pc-field__required"> *</span>
+                      </label>
+                      <div className="pc-field__control">
+                        <input
+                          id="zfs-replication-minutes"
+                          className="pc-field__input code"
+                          type="number"
+                          min={1}
+                          max={1440}
+                          value={storage.zfs.replicationMinutes}
+                          onChange={(e) =>
+                            setStorage((p) => ({ ...p, zfs: { ...p.zfs, replicationMinutes: e.target.value } }))
+                          }
+                        />
+                        <span className="code pc-field__bracket">minutes</span>
+                      </div>
+                      <span className="body-sm pc-field__hint">
+                        {validateIntRange(storage.zfs.replicationMinutes, 1, 1440, { required: true }) ??
+                          "the most recent writes a failover can lose — 1 to 1440 minutes"}
+                      </span>
+                    </div>
+
+                    {replicationHint && (
+                      <div className={`pc-callout pc-callout--${replicationHint.tone}`}>
+                        <span className="code pc-callout__glyph">{replicationHint.glyph}</span>
+                        <div className="pc-callout__body">
+                          <p className="body-sm pc-callout__text">{replicationHint.text}</p>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* local storage — only once some disk is actually marked
+                    local; with none, there's no pool to configure. the
+                    plan's local settings are kept, so marking a disk local
+                    later brings back whatever was chosen before. */}
+                {anyLocalDisks && (
+                <div
+                  className="flex flex-col border border-border bg-surface-100 p-5"
+                  style={{ gap: "var(--space-5)" }}
+                >
+                  {/* deliberately not just "local storage": that's the name
+                      of a disk role above, and two different things sharing
+                      a label in one step is how a form gets misread. */}
+                  <p className="label text-ink-muted">the local storage pool</p>
+
+                  <fieldset className="pc-radio-group" style={{ border: 0, margin: 0, padding: 0 }}>
+                    <legend className="label pc-radio-group__legend">
+                      what the disks marked &ldquo;local storage&rdquo; become
+                    </legend>
+                    {LOCAL_STORAGE_OPTIONS.map((opt) => (
+                      <label key={opt.value} className="pc-radio">
+                        <input
+                          type="radio"
+                          name="local-storage-kind"
+                          checked={storage.local.kind === opt.value}
+                          onChange={() => setStorage((p) => ({ ...p, local: { ...p.local, kind: opt.value } }))}
+                        />
+                        <span className="pc-radio__box" />
+                        <span>
+                          <span className="code pc-radio__label">{opt.label}</span>
+                          <span className="body-sm pc-checkbox__hint">{opt.hint}</span>
+                        </span>
+                      </label>
+                    ))}
+                  </fieldset>
+
+                  <PoolNameField
+                    id="local-storage-name"
+                    label="storage id"
+                    hint="how this shows up in the proxmox ui, on every node that has one"
+                    value={storage.local.name}
+                    onChange={(name) => setStorage((p) => ({ ...p, local: { ...p.local, name } }))}
+                  />
+                </div>
+                )}
+
+              </div>
+
+              {revealErrors && <ProblemList problems={blocking} step={currentStep} />}
+              <div className="pc-stepflow__nav">
+                <button type="button" className="pc-btn" onClick={() => setCurrentStep("network")}>
+                  <span className="pc-btn__bracket">[</span>
+                  back
+                  <span className="pc-btn__bracket">]</span>
+                </button>
+                <button
+                  type="button"
+                  className="pc-btn pc-btn--primary"
+                  onClick={() => tryPreview("storage")}
+                >
+                  <span className="pc-btn__bracket">[</span>
+                  preview
+                  <span className="pc-btn__bracket">]</span>
+                </button>
+              </div>
+            </div>
+          )}
+          </RevealErrorsContext.Provider>
+
           <p className="meta mt-3 text-ink-muted">
-            steps 3–5 — storage, backups, install software — aren&apos;t built yet.
+            steps 4–5 — backups, install software — aren&apos;t built yet.
           </p>
         </div>
       </main>

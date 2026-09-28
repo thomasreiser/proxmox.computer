@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Background,
@@ -16,7 +17,9 @@ import {
   type Edge,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { loadPersistedState, type PersistedState } from "../../wizard-state";
+import { problemsUpTo } from "../../step-checks";
+import { ProblemList } from "../../problem-list";
+import { loadPersistedState, persistCurrentStep, type PersistedState } from "../../wizard-state";
 import { buildClusterTopology, cephCableCount, distinctVlanTags, type NodeTopology } from "./topology";
 import { NetworkNodeCard, type NetworkNodeCardNode } from "./node-card";
 import { SwitchNode, type SwitchNodeType } from "./switch-node";
@@ -253,8 +256,22 @@ function NetworkCanvas({
 }
 
 export default function NetworkPreview() {
+  const router = useRouter();
   const [saved, setSaved] = useState<PersistedState | null>(null);
   const [hydrated, setHydrated] = useState(false);
+
+  // the wizard lives on one route, so advancing a step means telling the
+  // saved state which step to reopen on and going back to it — same
+  // hand-off the hardware preview makes into this one.
+  // the same gate the wizard's preview button applies: this page can be
+  // opened by url, so "next" can't assume the step behind it is complete
+  const blocking = useMemo(() => (saved ? problemsUpTo("network", saved) : []), [saved]);
+
+  function goToStorage() {
+    if (blocking.length > 0) return;
+    persistCurrentStep("storage");
+    router.push("/setup");
+  }
 
   // reading localStorage during render would desync the client from the
   // server html, so it has to happen post-mount — same trade the wizard
@@ -306,7 +323,11 @@ export default function NetworkPreview() {
               is an address the host itself answers on,{" "}
               <span className="code">serves</span> is only the subnet that
               bridge switches for its vms. Ports carrying ceph are marked at
-              both ends — those all have to land on one switch.
+              both ends — those all have to land on one switch. Each switch
+              port shows the connector it needs and how to set its vlans:{" "}
+              <span className="code">u</span> is untagged (native),{" "}
+              <span className="code">t</span> the 802.1q-tagged vlans it
+              carries.
             </p>
           </div>
 
@@ -369,7 +390,7 @@ export default function NetworkPreview() {
               drawn with a single switch on purpose, and that's exactly the
               constraint ceph imposes — worth saying out loud, because a
               visitor with two switches will otherwise split these ports
-              across both without realising what it costs. */}
+              across both without realizing what it costs. */}
           {hydrated && cephCables > 0 && (
             <div className="pc-callout pc-callout--warning">
               <span className="code pc-callout__glyph">⚠</span>
@@ -392,11 +413,18 @@ export default function NetworkPreview() {
             </div>
           )}
 
+          {hydrated && saved && <ProblemList problems={blocking} step="network" />}
           <div className="pc-stepflow__nav">
             <Link href="/setup" className="pc-btn pc-btn--ghost">
               ← back to network
             </Link>
-            <button type="button" className="pc-btn" disabled title="steps 3–5 aren't built yet">
+            <button
+              type="button"
+              className="pc-btn pc-btn--primary"
+              onClick={goToStorage}
+              disabled={blocking.length > 0}
+              title={blocking.length > 0 ? "fix the problems listed above first" : undefined}
+            >
               <span className="pc-btn__bracket">[</span>
               next
               <span className="pc-btn__bracket">]</span>

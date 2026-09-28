@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
-  activeStoragePurpose,
+  activeStoragePurposes,
   addressableBridgeKeys,
   applyNetworkStructure,
+  applyStorageRoles,
+  defaultAdditionalDisk,
   buildAddressConflicts,
   buildPlaceholderTable,
   clusterStorageDisksAvailable,
@@ -13,11 +15,12 @@ import {
   deriveExampleSubnet,
   deriveGateway,
   deriveNodeCidr,
-  effectiveStorageHaMode,
+  effectiveClusterStorage,
   interfaceIdsFor,
   isDedicatedStorageBondPurpose,
   maxBondsForCluster,
   minAdditionalDisks,
+  nextFreeHostInNetwork,
   nextVmbrName,
   nonCollidingPlaceholderSubnet,
   resizeArray,
@@ -25,7 +28,7 @@ import {
   siblingVlanTagsFor,
   withoutPurposes,
 } from "./derive";
-import { bond, bridge, cluster, network, nics, node } from "./test-fixtures";
+import { bond, bridge, cluster, disks, network, nics, node } from "./test-fixtures";
 
 describe("cluster storage availability", () => {
   it("is set by the worst-equipped node, not an average", () => {
@@ -52,28 +55,48 @@ describe("cluster storage availability", () => {
   });
 });
 
-describe("effectiveStorageHaMode", () => {
-  // the choice is remembered but not honoured while its prerequisites are
-  // missing — add the disks back and it re-selects itself.
-  it("falls back to none below 2 nodes without discarding the choice", () => {
-    expect(effectiveStorageHaMode("ceph", cluster(1))).toBe("none");
+describe("effectiveClusterStorage", () => {
+  const both = { ceph: true, zfs: true };
+  const cephOnly = { ceph: true, zfs: false };
+  const zfsOnly = { ceph: false, zfs: true };
+  const neither = { ceph: false, zfs: false };
+
+  // the choice is remembered but not honored while its prerequisites are
+  // missing — add them back and it re-applies itself
+  it("turns everything off below 2 nodes without discarding the choice", () => {
+    expect(effectiveClusterStorage(both, cluster(1))).toEqual(neither);
   });
 
-  it("falls back to none when a node has no spare disk", () => {
+  it("turns everything off when a node has no spare disk", () => {
     const nodes = cluster(3);
     nodes[2].additionalDisks = [];
-    expect(effectiveStorageHaMode("ceph", nodes)).toBe("none");
+    expect(effectiveClusterStorage(cephOnly, nodes)).toEqual(neither);
+    expect(effectiveClusterStorage(zfsOnly, nodes)).toEqual(neither);
   });
 
-  it("honours the choice once both prerequisites hold", () => {
-    expect(effectiveStorageHaMode("ceph", cluster(3))).toBe("ceph");
-    expect(effectiveStorageHaMode("zfs-replication", cluster(2))).toBe("zfs-replication");
+  it("honors either mode on its own with one spare disk per node", () => {
+    expect(effectiveClusterStorage(cephOnly, cluster(3))).toBe(cephOnly);
+    expect(effectiveClusterStorage(zfsOnly, cluster(2))).toBe(zfsOnly);
   });
 
-  it("maps a mode to the nic purpose that carries it", () => {
-    expect(activeStoragePurpose("ceph")).toBe("ceph");
-    expect(activeStoragePurpose("zfs-replication")).toBe("zfs");
-    expect(activeStoragePurpose("none")).toBeNull();
+  // ceph takes each osd disk whole, so zfs needs one of its own
+  it("runs both only with two spare disks on every node", () => {
+    expect(effectiveClusterStorage(both, cluster(3, { additionalDisks: disks(1000, 1000) }))).toBe(both);
+  });
+
+  // with one disk only one fits, and ceph is the one guests' disks live on
+  it("keeps ceph and drops zfs when there's only room for one", () => {
+    expect(effectiveClusterStorage(both, cluster(3))).toEqual(cephOnly);
+  });
+
+  it("returns the same object when nothing needs dropping", () => {
+    expect(effectiveClusterStorage(neither, cluster(3))).toBe(neither);
+  });
+
+  it("names the nic purposes the enabled storage needs, ceph first", () => {
+    expect(activeStoragePurposes(both)).toEqual(["ceph", "zfs"]);
+    expect(activeStoragePurposes(zfsOnly)).toEqual(["zfs"]);
+    expect(activeStoragePurposes(neither)).toEqual([]);
   });
 });
 
@@ -111,7 +134,7 @@ describe("collectNodeNames", () => {
   it("keeps disk and interface names in separate namespaces", () => {
     const n = node({
       bootDiskName: "boot",
-      additionalDisks: [{ type: "ssd", sizeGb: "1000", name: "ceph" }],
+      additionalDisks: disks({ name: "ceph" }),
       nics: nics({ name: "ceph" }),
       network: network({ bonds: [bond({ name: "bond0" })], bridges: { "nic-0#0": bridge({ name: "vmbr0" }) } }),
     });
@@ -343,6 +366,13 @@ describe("applyNetworkStructure", () => {
 });
 
 describe("withoutPurposes", () => {
+  // regression: it runs from an effect whose own setNodes re-triggers it,
+  // so a fresh array when nothing was stripped looped the wizard forever
+  it("returns the same array when no bridge carries a purpose being stripped", () => {
+    const nodes = cluster(2);
+    expect(withoutPurposes(nodes, ["ceph", "zfs"])).toBe(nodes);
+  });
+
   it("returns the same array when nothing needs stripping", () => {
     const nodes = cluster(2);
     expect(withoutPurposes(nodes, [])).toBe(nodes);
@@ -384,7 +414,48 @@ describe("resizeArray", () => {
   });
 });
 
+describe("applyStorageRoles", () => {
+  it("copies roles onto every node by disk position", () => {
+    const nodes = cluster(3, { additionalDisks: disks(1000, 1000) });
+    const template = disks({ role: "local" }, { role: "unused" });
+    const out = applyStorageRoles(nodes, template);
+    for (const n of out) {
+      expect(n.additionalDisks.map((d) => d.role)).toEqual(["local", "unused"]);
+    }
+  });
+
+  // a node with fewer disks takes as many roles as it has slots, rather
+  // than inventing a disk to hold the extra role.
+  it("stops at the shorter of the two lists", () => {
+    const nodes = cluster(1, { additionalDisks: disks(1000) });
+    const out = applyStorageRoles(nodes, disks({ role: "local" }, { role: "unused" }));
+    expect(out[0].additionalDisks).toHaveLength(1);
+    expect(out[0].additionalDisks[0].role).toBe("local");
+  });
+
+  // ...and a node with more leaves its extras alone, since the template
+  // says nothing about them.
+  it("leaves disks the template doesn't describe untouched", () => {
+    const nodes = cluster(1, { additionalDisks: disks(1000, { role: "unused" }) });
+    const out = applyStorageRoles(nodes, disks({ role: "local" }));
+    expect(out[0].additionalDisks.map((d) => d.role)).toEqual(["local", "unused"]);
+  });
+
+  it("copies nothing but roles — sizes and names stay per node", () => {
+    const nodes = cluster(1, { additionalDisks: disks({ sizeGb: "4000", name: "big" }) });
+    const out = applyStorageRoles(nodes, disks({ sizeGb: "500", name: "small", role: "local" }));
+    expect(out[0].additionalDisks[0]).toMatchObject({ sizeGb: "4000", name: "big", role: "local" });
+  });
+});
+
 describe("defaults", () => {
+  // a new disk has no role chosen yet — it resolves to the cluster storage
+  // in effect (see effectiveDiskRole), since that's almost always why a
+  // disk beyond boot was added
+  it("starts a new disk with no role chosen", () => {
+    expect(defaultAdditionalDisk(0).role).toBe("");
+  });
+
   it("starts a node with matching nic count and nics", () => {
     const n = defaultNode(0, "10.0.0.0/24");
     expect(n.nics).toHaveLength(Number(n.nicCount));
@@ -402,5 +473,27 @@ describe("defaults", () => {
     expect(isDedicatedStorageBondPurpose(["ceph"])).toBe(true);
     expect(isDedicatedStorageBondPurpose(["zfs"])).toBe(true);
     expect(isDedicatedStorageBondPurpose(["vm", "cluster"])).toBe(false);
+  });
+});
+
+describe("placeholder fallbacks when everything is taken", () => {
+  // after 25 candidates the allocator gives up gracefully rather than
+  // looping — it returns the first suggestion even though it collides.
+  it("falls back to the first suggestion once every candidate subnet is used", () => {
+    const bridges: Record<string, ReturnType<typeof bridge>> = {};
+    for (let i = 0; i < 30; i++) {
+      bridges[`nic-${i}#0`] = bridge({ purposes: ["ceph"], ip: `10.0.${10 + i * 10}.11/24` });
+    }
+    const n = node({ network: network({ bridges }) });
+    expect(nonCollidingPlaceholderSubnet(n, "10.0.0.0/24", 0, 0)?.network).toBe("10.0.10.0/24");
+  });
+
+  it("suggests .1 when every host in the network is reserved", () => {
+    const reserved = new Set(Array.from({ length: 254 }, (_, i) => `10.0.20.${i + 1}`));
+    expect(nextFreeHostInNetwork("10.0.20.0", reserved)).toBe("10.0.20.1");
+  });
+
+  it("skips reserved hosts and the network address itself", () => {
+    expect(nextFreeHostInNetwork("10.0.20.0", new Set(["10.0.20.1", "10.0.20.2"]))).toBe("10.0.20.3");
   });
 });

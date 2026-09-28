@@ -1,7 +1,8 @@
 "use client";
 
 import { Handle, Position, type Node, type NodeProps } from "@xyflow/react";
-import { cephCableCount, type NodeTopology } from "./topology";
+import { NIC_PORT_LABEL } from "../../wizard-state";
+import { cephCableCount, portVlanDescription, portVlanLabel, type NodeTopology } from "./topology";
 
 export type SwitchNodeData = { name: string; topologies: NodeTopology[] };
 export type SwitchNodeType = Node<SwitchNodeData, "switch">;
@@ -41,23 +42,35 @@ export function SwitchNode({ data }: NodeProps<SwitchNodeType>) {
                 <div
                   key={cable.id}
                   className={`pc-switch__portbox${cable.iface.carriesCeph ? " pc-switch__portbox--ceph" : ""}`}
-                  title={`${topology.node.name} — ${cable.nicName}${cable.iface.carriesCeph ? " — ceph" : ""}`}
+                  title={[
+                    `${topology.node.name} — ${cable.nicName}`,
+                    cable.nicPort ? NIC_PORT_LABEL[cable.nicPort] : "connector unknown",
+                    portVlanDescription(cable.iface),
+                    ...(cable.iface.carriesCeph ? ["ceph"] : []),
+                  ].join(" — ")}
                 >
+                  {/* what the switch port must be: its connector, then how
+                      its vlans are set — the two things you configure (or
+                      buy) a switch port by */}
+                  <span className="meta pc-switch__porttype">
+                    {cable.nicPort ? NIC_PORT_LABEL[cable.nicPort] : "?"}
+                  </span>
+                  <span
+                    className={`meta pc-switch__portvlan ${portVlanLabel(cable.iface).includes("?") ? "pc-switch__portvlan--warn" : ""}`}
+                  >
+                    {portVlanLabel(cable.iface)}
+                  </span>
                   <Handle
                     type="target"
                     position={Position.Top}
                     id={cable.id}
                     isConnectable={false}
                     className="pc-switch__plug"
-                    // Position.Top's default css straddles the box's
-                    // border (half in, half out) — pull it to the box's
-                    // actual center so the cable reads as plugged into
-                    // the port, not just touching its top edge.
+                    // anchored on the box's top edge, so the cable arrives
+                    // at the port without drawing over its labels
                     style={{
                       background: cable.iface.colorVar,
                       borderColor: cable.iface.colorVar,
-                      top: "50%",
-                      transform: "translate(-50%, -50%)",
                     }}
                   />
                 </div>

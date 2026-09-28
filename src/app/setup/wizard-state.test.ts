@@ -1,11 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   MAX_BRIDGES_PER_INTERFACE,
   STORAGE_VERSION,
+  NIC_PORT_LABEL,
   STORAGE_KEY,
   bridgeCountFor,
   bridgeKey,
   bondModeLabel,
+  effectivePort,
   interfacesFor,
   isFastNic,
   isPersistedState,
@@ -16,10 +18,13 @@ import {
   nicSpeedLabel,
   nicSpeedsForInterface,
   persistCurrentStep,
+  portChoices,
+  portHint,
   validBonds,
   type PersistedState,
 } from "./wizard-state";
 import { bond, cluster, nics } from "./test-fixtures";
+import { defaultStoragePlan } from "./derive";
 
 function persisted(overrides: Partial<PersistedState> = {}): PersistedState {
   return {
@@ -33,7 +38,9 @@ function persisted(overrides: Partial<PersistedState> = {}): PersistedState {
     nodes: cluster(3),
     identicalHardware: true,
     identicalNetwork: false,
-    storageHaMode: "ceph",
+    clusterStorage: { ceph: true, zfs: false },
+    storage: defaultStoragePlan(),
+    identicalStorage: false,
     ...overrides,
   };
 }
@@ -59,6 +66,51 @@ describe("nic speed classification", () => {
   it("labels every speed it knows", () => {
     expect(nicSpeedLabel("2.5gbe")).toBe("2.5 gbe");
     expect(nicSpeedLabel("25gbe")).toBe("25 gbe+");
+  });
+});
+
+describe("nic connectors", () => {
+  it.each([
+    ["1gbe", ["rj45", "sfp"]],
+    ["2.5gbe", ["rj45"]],
+    ["10gbe", ["sfp+", "rj45"]],
+    ["25gbe", ["sfp28", "qsfp28"]],
+    ["other", []],
+  ] as const)("offers the connectors a %s nic comes with", (speed, expected) => {
+    expect(portChoices(speed)).toEqual(expected);
+  });
+
+  it("defaults to the usual connector for the speed", () => {
+    expect(effectivePort({ speed: "10gbe", port: "" })).toBe("sfp+");
+    expect(effectivePort({ speed: "1gbe", port: "" })).toBe("rj45");
+  });
+
+  it("keeps a choice that fits the speed", () => {
+    expect(effectivePort({ speed: "10gbe", port: "rj45" })).toBe("rj45");
+  });
+
+  // a choice made at one speed doesn't carry into a speed it can't be
+  it("falls back when the speed changes under a choice that no longer fits", () => {
+    expect(effectivePort({ speed: "10gbe", port: "sfp" })).toBe("sfp+");
+    expect(effectivePort({ speed: "2.5gbe", port: "sfp+" })).toBe("rj45");
+  });
+
+  it("knows nothing about an unknown speed", () => {
+    expect(effectivePort({ speed: "other", port: "sfp+" })).toBeNull();
+  });
+
+  it("explains every connector it offers", () => {
+    for (const speed of ["1gbe", "2.5gbe", "10gbe", "25gbe"] as const) {
+      for (const port of portChoices(speed)) {
+        expect(portHint(speed, port).length).toBeGreaterThan(10);
+        expect(NIC_PORT_LABEL[port]).toBeTruthy();
+      }
+    }
+  });
+
+  it("tells 10g copper and 10g sfp+ apart", () => {
+    expect(portHint("10gbe", "rj45")).toMatch(/10gbase-t/);
+    expect(portHint("10gbe", "sfp+")).toMatch(/dac/);
   });
 });
 
@@ -183,7 +235,7 @@ describe("isPersistedState", () => {
     expect(isPersistedState(persisted())).toBe(true);
   });
 
-  // the version check is the real defence: a shape change from an older
+  // the version check is the real defense: a shape change from an older
   // build is discarded wholesale rather than half-applied.
   it("rejects a state from another version", () => {
     expect(isPersistedState({ ...persisted(), version: STORAGE_VERSION - 1 })).toBe(false);
@@ -193,21 +245,45 @@ describe("isPersistedState", () => {
     expect(isPersistedState(value)).toBe(false);
   });
 
+  it("accepts every step this build can reopen on", () => {
+    for (const step of ["hardware", "network", "storage"] as const) {
+      expect(isPersistedState(persisted({ currentStep: step }))).toBe(true);
+    }
+  });
+
   it.each([
-    ["currentStep", "storage"],
+    ["currentStep", "backups"],
     ["nodeCount", 3],
     ["globalCidr", null],
     ["identicalNetwork", "yes"],
-    ["storageHaMode", "raid"],
+    ["clusterStorage", "ceph"],
+    ["clusterStorage", { ceph: "yes", zfs: false }],
     ["nodes", {}],
+    ["identicalStorage", "yes"],
+    ["storage", null],
   ])("rejects a bad %s", (key, value) => {
     expect(isPersistedState({ ...persisted(), [key]: value })).toBe(false);
+  });
+
+  it("rejects a storage plan missing one of its sections", () => {
+    const state = persisted();
+    // @ts-expect-error — deliberately corrupting a saved plan
+    delete state.storage.ceph;
+    expect(isPersistedState(state)).toBe(false);
   });
 
   it("rejects a node missing its network", () => {
     const state = persisted();
     // @ts-expect-error — deliberately corrupting a saved node
     delete state.nodes[0].network;
+    expect(isPersistedState(state)).toBe(false);
+  });
+
+  // a save from before connectors existed has nics without a port
+  it("rejects a nic without a connector field", () => {
+    const state = persisted();
+    // @ts-expect-error — deliberately corrupting a saved nic
+    delete state.nodes[0].nics[0].port;
     expect(isPersistedState(state)).toBe(false);
   });
 
@@ -256,5 +332,34 @@ describe("persistCurrentStep", () => {
   it("does nothing when there's no save to update", () => {
     persistCurrentStep("network");
     expect(window.localStorage.getItem(STORAGE_KEY)).toBeNull();
+  });
+});
+
+describe("when storage itself fails", () => {
+  // private browsing, a full quota, or storage disabled outright: the
+  // wizard must carry on, not throw on mount or on a step hand-off.
+  it("treats unreadable storage as nothing saved", () => {
+    const spy = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+      throw new Error("SecurityError");
+    });
+    try {
+      expect(loadPersistedState()).toBeNull();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("swallows a failed write during a step hand-off", () => {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(persisted()));
+    const spy = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new Error("QuotaExceededError");
+    });
+    try {
+      expect(() => persistCurrentStep("storage")).not.toThrow();
+    } finally {
+      spy.mockRestore();
+    }
+    // the save it couldn't update is left exactly as it was
+    expect(loadPersistedState()?.currentStep).toBe("network");
   });
 });

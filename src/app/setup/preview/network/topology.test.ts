@@ -5,6 +5,8 @@ import {
   buildClusterTopology,
   cephCableCount,
   distinctVlanTags,
+  portVlanDescription,
+  portVlanLabel,
   vlanLabel,
 } from "./topology";
 import { bond, bridge, cluster, network, nics, node } from "../../test-fixtures";
@@ -30,7 +32,7 @@ describe("buildClusterTopology", () => {
 
   // bond hues are per node so the palette can never run out: a node has
   // at most 8 nics, so at most 4 bonds.
-  it("gives each bond on a node its own colour, resetting per node", () => {
+  it("gives each bond on a node its own color, resetting per node", () => {
     const nodes = cluster(2, {
       nics: nics("1gbe", "1gbe", "1gbe", "1gbe"),
       network: network({
@@ -39,9 +41,9 @@ describe("buildClusterTopology", () => {
       }),
     });
     const [first, second] = buildClusterTopology(nodes, ctx);
-    const colours = first.interfaces.map((i) => i.colorVar);
-    expect(new Set(colours).size).toBe(colours.length);
-    expect(second.interfaces.map((i) => i.colorVar)).toEqual(colours);
+    const colors = first.interfaces.map((i) => i.colorVar);
+    expect(new Set(colors).size).toBe(colors.length);
+    expect(second.interfaces.map((i) => i.colorVar)).toEqual(colors);
   });
 
   it("marks the management interface", () => {
@@ -195,12 +197,54 @@ describe("cephCableCount", () => {
 });
 
 describe("resilience to mid-edit state", () => {
-  // a nic can briefly have no interface between a structural edit and its
-  // resync — the preview has to render, not crash.
-  it("falls back to an empty interface for an unclaimed nic", () => {
+  // a node mid-edit can have nics with no bridges configured at all —
+  // every nic still gets a cable and an interface to hang it off.
+  it("draws a cable for every nic even with no bridges configured", () => {
     const nodes = [node({ nics: nics("1gbe", "1gbe"), network: network({ bonds: [], bridges: {} }) })];
     const topo = buildClusterTopology(nodes, ctx)[0];
     expect(topo.cables).toHaveLength(2);
     expect(topo.cables.every((c) => c.iface !== undefined)).toBe(true);
+  });
+});
+
+describe("switch port labels", () => {
+  const ifaceWith = (bridges: ReturnType<typeof bridge>[], homelabVlan: number | null = null) => {
+    const counts = { "nic-0": String(bridges.length) };
+    const map = Object.fromEntries(bridges.map((b, i) => [`nic-0#${i}`, b]));
+    const nodes = cluster(1, { network: network({ bridgeCounts: counts, bridges: map }) });
+    return buildClusterTopology(nodes, { ...ctx, homelabVlan })[0].interfaces[0];
+  };
+
+  it("marks a plain untagged port", () => {
+    expect(portVlanLabel(ifaceWith([bridge()]))).toBe("u");
+    expect(portVlanDescription(ifaceWith([bridge()]))).toBe("untagged");
+  });
+
+  it("names the native vlan when the homelab numbers it", () => {
+    expect(portVlanLabel(ifaceWith([bridge()], 5))).toBe("u5");
+  });
+
+  it("lists tagged vlans after the native one, sorted", () => {
+    const iface = ifaceWith([bridge(), bridge({ vlanTag: "30" }), bridge({ vlanTag: "20" })]);
+    expect(portVlanLabel(iface)).toBe("u t20,30");
+    expect(portVlanDescription(iface)).toBe("untagged · tagged: vlan 20, 30");
+  });
+
+  // a port can't be configured until every bridge on it has its tag
+  it("flags a tagged bridge still missing its tag", () => {
+    const iface = ifaceWith([bridge(), bridge({ vlanTag: "" })]);
+    expect(portVlanLabel(iface)).toBe("u t?");
+    expect(portVlanDescription(iface)).toMatch(/no vlan set yet/);
+  });
+
+  it("says there's nothing to configure without bridges", () => {
+    const iface = buildClusterTopology([node({ network: network({ bridges: {} }) })], ctx)[0].interfaces[0];
+    expect(portVlanLabel(iface)).toBe("—");
+  });
+
+  it("carries each nic's connector onto its cable", () => {
+    const nodes = cluster(1, { nics: nics({ speed: "10gbe" }, { speed: "10gbe", port: "rj45" }, "other") });
+    const ports = buildClusterTopology(nodes, ctx)[0].cables.map((c) => c.nicPort);
+    expect(ports).toEqual(["sfp+", "rj45", null]);
   });
 });

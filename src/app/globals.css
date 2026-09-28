@@ -383,7 +383,7 @@ body {
 .pc-nodecard__nic { position: relative; display: flex; align-items: baseline; gap: var(--space-2); }
 .pc-nodecard__nicname { color: var(--ink); flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* the nic rows sit inside the card's 12px padding, so -16px lands an 8px
-   port centred on the chassis border — where a cable to a switch will
+   port centered on the chassis border — where a cable to a switch will
    later anchor. */
 .pc-canvas .pc-nodecard__port { width: 8px; height: 8px; right: -16px; border-radius: var(--radius-none); border: 1px solid var(--surface-200); background: var(--brand); }
 
@@ -400,6 +400,10 @@ body {
 /* Network preview: a taller canvas, since the switch sits below the node
    row and needs its own vertical room. */
 .pc-canvas--tall { height: min(80vh, 860px); }
+/* Storage preview: one row of node cards over one pool card — wide and
+   short, so a tall canvas only fits it to its width and pads the rest
+   with empty space. */
+.pc-canvas--storage { height: min(62vh, 620px); }
 
 /* The node card's width and the gap between cards are a contract, not a
    style choice: the switch's per-node port groups below reuse both so each
@@ -466,7 +470,13 @@ body {
 .pc-switch__groups { display: flex; gap: var(--netcard-gap); }
 .pc-switch__group:nth-child(even) { background: var(--surface-100); }
 .pc-switch__ports { width: var(--netcard-w); box-sizing: border-box; display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; padding: var(--space-4) 0; }
-.pc-switch__portbox { position: relative; height: 20px; margin: 0 3px; border: 1px solid var(--border-strong); background: var(--surface-300); }
+/* a port box now carries two lines — connector, then vlan config — so it
+   sizes to its content and the plug sits on its top edge instead of its
+   middle, where it would draw the cable across the text */
+.pc-switch__portbox { position: relative; display: flex; flex-direction: column; align-items: center; gap: 1px; min-width: 0; margin: 0 3px; padding: 5px 2px 3px; border: 1px solid var(--border-strong); background: var(--surface-300); }
+.pc-switch__porttype { color: var(--ink); font-size: 10px; font-weight: 600; line-height: 12px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pc-switch__portvlan { color: var(--ink-muted); font-size: 10px; line-height: 12px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pc-switch__portvlan--warn { color: var(--warning); }
 .pc-canvas .pc-switch__plug { width: 8px; height: 8px; top: -5px; border-radius: var(--radius-none); border: 1px solid var(--surface-200); background: var(--border-strong); }
 
 /* ================= how-it-works pipeline ================= */
@@ -598,7 +608,7 @@ body {
   bottom: 0;
   border-left: 1px solid var(--border-strong);
 }
-/* the elbow's horizontal arm, landing on the row's exact vertical centre —
+/* the elbow's horizontal arm, landing on the row's exact vertical center —
    which is why the row has a fixed height rather than an intrinsic one. */
 .pc-tree__guide--elbow::after {
   content: "";
@@ -639,3 +649,103 @@ body {
 .pc-link { color: var(--brand); text-decoration: underline; text-underline-offset: 2px; text-decoration-color: var(--border-strong); }
 .pc-link:hover { text-decoration-color: var(--brand); }
 .pc-link:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+
+/* ================= step 3 — storage ================= */
+/* The boot disk, shown in the step-3 form above the disks the visitor
+   actually assigns — it's the one disk they never choose a role for, and
+   listing it inline would invite the idea that they could. */
+.pc-diskline { display: flex; align-items: baseline; gap: var(--space-3); flex-wrap: wrap; padding: var(--space-2) var(--space-3); border: 1px dashed var(--border); background: var(--surface-300); }
+.pc-diskline__meta { color: var(--ink-muted); }
+.pc-diskline__locked { color: var(--ink-dim); margin-left: auto; text-transform: uppercase; letter-spacing: 0.06em; font-size: 10px; }
+/* the "2+ disks" note beside a raid level — quieter than the label it
+   qualifies, since it's a constraint rather than the name of the thing */
+.pc-radio__aside { color: var(--ink-dim); font-weight: 400; }
+
+/* ================= storage preview (react flow) ================= */
+/* Same contract as the network preview's --netcard-*: the pool card's
+   port boxes below are laid out from these two numbers, so every cable
+   drops straight down. Changing either means changing CARD_WIDTH/GAP in
+   preview/storage/page.tsx to match. */
+:root {
+  --storcard-w: 320px;
+  --storcard-gap: 56px;
+}
+
+.pc-storcard { width: var(--storcard-w); border: 1px solid var(--border-strong); background: var(--surface-200); box-shadow: var(--inset-hairline); }
+.pc-storcard__head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-2); padding: var(--space-3); border-bottom: 1px solid var(--border-strong); background: var(--surface-400); }
+.pc-storcard__host { color: var(--brand); font-weight: 700; }
+.pc-storcard__index { color: var(--ink-dim); }
+.pc-storcard__body { display: flex; flex-direction: column; gap: var(--space-1); padding: var(--space-3); }
+.pc-storcard__empty { color: var(--ink-dim); margin: 0; }
+
+/* one disk: swatch, name, type, size, role — the swatch is what survives
+   being zoomed out past the point where the labels are legible. */
+.pc-storcard__disk { display: flex; align-items: baseline; gap: var(--space-2); padding: 3px 0; border-bottom: 1px solid var(--border); }
+.pc-storcard__disk:last-child { border-bottom: 0; }
+.pc-storcard__disk--unused { opacity: 0.55; }
+.pc-storcard__disk--boot { border-bottom: 1px dashed var(--border); margin-bottom: var(--space-1); }
+.pc-storcard__swatch { width: 8px; height: 8px; flex: none; align-self: center; }
+.pc-storcard__diskname { color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.pc-storcard__disktype { color: var(--ink-dim); text-transform: uppercase; letter-spacing: 0.06em; font-size: 10px; }
+.pc-storcard__disksize { color: var(--ink); margin-left: auto; flex: none; font-size: 13px; }
+.pc-storcard__diskrole { flex: none; text-transform: uppercase; letter-spacing: 0.06em; font-size: 10px; min-width: 42px; text-align: right; }
+
+.pc-storcard__foot { position: relative; display: flex; align-items: baseline; gap: var(--space-2); padding: var(--space-2) var(--space-3); border-top: 1px solid var(--border-strong); background: var(--surface-400); }
+.pc-storcard__footkey { color: var(--ink-dim); text-transform: uppercase; letter-spacing: 0.06em; font-size: 10px; }
+.pc-storcard__footval { color: var(--brand); margin-left: auto; font-size: 13px; }
+/* the nic speed under the storage traffic — warning-colored below 10gbe,
+   the same threshold the wizard's ceph speed hint uses */
+.pc-storcard__link { display: flex; align-items: baseline; gap: var(--space-2); padding: var(--space-2) var(--space-3); border-top: 1px solid var(--border); }
+.pc-storcard__linkval { color: var(--ink); margin-left: auto; font-size: 13px; text-align: right; }
+.pc-storcard__linkval--warn { color: var(--warning); }
+.pc-storcard__link--stacked { flex-direction: column; align-items: stretch; gap: 2px; }
+.pc-storcard__linkrow { display: flex; align-items: baseline; gap: var(--space-2); }
+.pc-storcard__linkreason { margin: 0; color: var(--warning); font-size: 10px; line-height: 14px; }
+/* zfs's own pool on this node — its role color, so it matches the disks it's built from */
+.pc-storcard__zfsval { color: var(--cable-b); margin-left: auto; font-size: 13px; text-align: right; }
+/* a plug at each end of the cable, same as the network preview's ports:
+   one straddling this card's bottom edge, one on the pool's top edge */
+.pc-canvas .pc-storcard__plug { width: 8px; height: 8px; bottom: -5px; left: 50%; border-radius: var(--radius-none); border: 1px solid var(--surface-200); background: var(--brand); }
+/* the zfs cable's anchor sits on the card's own bottom edge, not inside the ceph footer */
+.pc-canvas .pc-storcard__plug--zfs { background: var(--cable-b); }
+.pc-storcard { position: relative; }
+
+/* The pool every node feeds. Sized to span the whole node row so its port
+   boxes line up under the cards, exactly like the network preview's
+   switch. */
+.pc-pool { border: 1px solid var(--brand); background: var(--surface-200); box-shadow: var(--inset-hairline); }
+.pc-pool--zfs { border-color: var(--cable-b); }
+.pc-pool__head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-2); padding: var(--space-3); border-bottom: 1px solid var(--border-strong); background: var(--surface-400); }
+.pc-pool__name { color: var(--brand); font-weight: 700; font-size: 15px; }
+.pc-pool--zfs .pc-pool__name { color: var(--cable-b); }
+.pc-pool__kind { color: var(--ink-muted); text-transform: uppercase; letter-spacing: 0.06em; }
+.pc-pool__body { display: flex; flex-direction: column; gap: var(--space-3); padding: var(--space-4); }
+.pc-pool__headline { display: flex; align-items: baseline; gap: var(--space-3); }
+.pc-pool__key { color: var(--ink-dim); }
+.pc-pool__usable { color: var(--ink); font-size: 24px; font-weight: 700; }
+.pc-pool__raw { color: var(--ink-muted); }
+.pc-pool__facts { display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-5); }
+.pc-pool__fact { display: flex; flex-direction: column; gap: 1px; }
+.pc-pool__val { color: var(--ink); font-size: 13px; }
+.pc-pool__warn { color: var(--warning); margin: 0; }
+/* one equal-width port box per node, in node order — identical grid to
+   the row of cards above, so each cable is a straight, non-crossing drop */
+/* the -1px pulls the row out over the card's own 1px border, so each port
+   lines up with the node card above to the pixel and the cable stays
+   exactly vertical */
+.pc-pool__ports { display: grid; grid-auto-flow: column; grid-auto-columns: var(--storcard-w); column-gap: var(--storcard-gap); margin: 0 -1px; }
+/* sits flush on the card's top border, so the plug straddles the edge
+   exactly where the cable arrives */
+.pc-pool__portbox { position: relative; height: 0; }
+.pc-canvas .pc-pool__plug { width: 8px; height: 8px; left: 50%; border-radius: var(--radius-none); border: 1px solid var(--surface-200); background: var(--brand); }
+
+/* The list of what's blocking a step: where, which field, what's wrong —
+   laid out as a small table so a long list stays scannable. */
+.pc-problems { list-style: none; margin: var(--space-2) 0 0 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-1); }
+.pc-problems__item { display: grid; grid-template-columns: minmax(0, 14em) minmax(0, 14em) 1fr; gap: var(--space-3); }
+.pc-problems__where { color: var(--ink-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pc-problems__field { color: var(--ink); font-weight: 600; }
+.pc-problems__message { color: var(--danger); }
+@media (max-width: 720px) {
+  .pc-problems__item { grid-template-columns: 1fr; gap: 0; padding-bottom: var(--space-2); border-bottom: 1px solid var(--border); }
+}

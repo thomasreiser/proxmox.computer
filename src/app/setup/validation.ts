@@ -195,3 +195,14 @@ export function validateOptionalVlanTag(value: string): string | null {
   if (n < 1 || n > 4094) return "must be between 1 and 4094";
   return null;
 }
+
+/**
+ * Makes an otherwise-optional validator required: blank is "required",
+ * anything else is up to `validate`. Several validators here treat blank
+ * as "not answered yet" (validateCidr, validateIp, validateHostLabel) —
+ * right while typing, wrong for a field the next step can't do without.
+ */
+export function required(value: string, validate: (value: string) => string | null): string | null {
+  if (!value.trim()) return "required";
+  return validate(value);
+}

@@ -10,7 +10,7 @@ import {
   stripMitigationSuffix,
 } from "./cpu";
 
-describe("the catalogue itself", () => {
+describe("the catalog itself", () => {
   it("offers both vendors", () => {
     expect(cpuVendorOptions.map((v) => v.value).sort()).toEqual(["amd", "intel"]);
   });
@@ -31,7 +31,7 @@ describe("the catalogue itself", () => {
 });
 
 describe("qemuTypeFor", () => {
-  it("resolves every catalogued family to a non-empty type", () => {
+  it("resolves every cataloged family to a non-empty type", () => {
     for (const vendor of ["intel", "amd"] as const) {
       for (const family of cpuFamilies.architectures[vendor]) {
         expect(qemuTypeFor(vendor, family.name)).toBeTruthy();
@@ -66,13 +66,13 @@ describe("nativeEntryFor", () => {
     expect(nativeEntryFor("intel", type)).toBeDefined();
   });
 
-  it("returns undefined for a type that isn't in the catalogue", () => {
+  it("returns undefined for a type that isn't in the catalog", () => {
     expect(nativeEntryFor("intel", "NotAType")).toBeUndefined();
   });
 });
 
 describe("defaultCoresFor", () => {
-  it("suggests a positive core count for every catalogued family", () => {
+  it("suggests a positive core count for every cataloged family", () => {
     for (const vendor of ["intel", "amd"] as const) {
       for (const family of cpuFamilies.architectures[vendor]) {
         expect(defaultCoresFor(vendor, family.name)).toBeGreaterThan(0);

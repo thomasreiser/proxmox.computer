@@ -12,17 +12,39 @@ export const MAX_NICS_PER_NODE = 8;
 export type CpuVendor = "intel" | "amd";
 export type DiskType = "nvme" | "ssd" | "hdd";
 export type NicSpeed = "1gbe" | "2.5gbe" | "10gbe" | "25gbe" | "other";
-export type WizardStepId = "hardware" | "network";
+export type WizardStepId = "hardware" | "network" | "storage";
+
+// The physical connector — what the switch port has to match. Speed alone
+// doesn't settle it: 10 gbe is either sfp+ or rj45 (10gbase-t), which need
+// different switch ports and different cabling.
+export type NicPort = "rj45" | "sfp" | "sfp+" | "sfp28" | "qsfp28";
 
 export interface NicInfo {
   speed: NicSpeed;
   name: string;
+  // the visitor's choice, or "" when they haven't made one — read it
+  // through effectivePort(), which falls back to the usual connector for
+  // the speed (see portChoices)
+  port: NicPort | "";
 }
+
+// What one disk beyond the boot disk is actually for. This lives on the
+// disk rather than in a parallel array on the node, so adding or removing
+// a disk back in step 1 can't shift every later disk's plan by one.
+//   "ceph"   — handed to ceph whole, as one osd
+//   "zfs"    — a member of this node's replicated zfs pool
+//   "local"  — this node's own storage, replicated nowhere
+//   "unused" — declared in step 1, deliberately left out of every pool
+export type DiskRole = "ceph" | "zfs" | "local" | "unused";
 
 export interface AdditionalDisk {
   type: DiskType;
   sizeGb: string;
   name: string;
+  // the visitor's choice, or "" when they haven't made one — read it
+  // through effectiveDiskRole() (storage.ts), which falls back to a role
+  // that fits the cluster storage actually enabled
+  role: DiskRole | "";
 }
 
 export interface HardwareSpec {
@@ -88,10 +110,66 @@ export function needsHostIpForPurposes(purposes: InterfacePurpose[], otherNeedsH
   return purposes.some((p) => PURPOSE_NEEDS_HOST_IP[p] ?? otherNeedsHostIp);
 }
 
-// the cluster-wide decision of how vm/ct storage stays available across
-// nodes — drives whether "ceph" or "zfs replication" is even offered as a
-// nic purpose, and only matters once there's more than 1 node.
-export type StorageHaMode = "ceph" | "zfs-replication" | "none";
+// How a zfs pool's member disks are arranged. Only a single vdev is
+// modeled: a homelab node's spare bays are few enough that a second vdev
+// is rare, and supporting one would mean asking which disks go in which
+// vdev — a question this wizard has no good way to ask.
+export type ZfsRaidLevel = "mirror" | "raidz1" | "raidz2" | "stripe";
+
+// what a node's "local" disks become
+export type LocalStorageKind = "zfs" | "lvm-thin" | "directory";
+
+export interface CephPlan {
+  poolName: string;
+  // ceph's `size`: how many copies of every object exist across the
+  // cluster. 3 is the default every ceph doc assumes.
+  replicas: string;
+  // ceph's `min_size`: how many copies must be writable before the pool
+  // accepts a write at all. 2 stays writable through one host being down
+  // while still refusing writes when only a single copy survives.
+  minReplicas: string;
+}
+
+export interface ZfsPlan {
+  poolName: string;
+  raidLevel: ZfsRaidLevel;
+  // minutes between replication runs. this is exactly the window of
+  // writes a failover can lose, which is the whole trade zfs replication
+  // makes against ceph.
+  replicationMinutes: string;
+}
+
+export interface LocalPlan {
+  kind: LocalStorageKind;
+  name: string;
+}
+
+// Step 3's cluster-wide answers. Which disks take part is decided per
+// node (see AdditionalDisk.role); everything here is one decision for the
+// whole cluster.
+export interface StoragePlan {
+  ceph: CephPlan;
+  zfs: ZfsPlan;
+  local: LocalPlan;
+}
+
+// The cluster-wide storage that keeps guests available across nodes.
+// Ceph and zfs replication are independent switches, not alternatives: a
+// cluster can run both — ceph as the main ha storage, say, with zfs
+// replication alongside for backups. Neither is a legitimate answer too.
+// Each drives whether its nic purpose is offered, and only matters once
+// there's more than 1 node.
+export type StorageMode = "ceph" | "zfs";
+
+export interface ClusterStorage {
+  ceph: boolean;
+  zfs: boolean;
+}
+
+/** the enabled modes, ceph first — the order everything lists them in */
+export function enabledStorageModes(cs: ClusterStorage): StorageMode[] {
+  return (["ceph", "zfs"] as const).filter((m) => cs[m]);
+}
 
 export type BondMode = "active-backup" | "lacp" | "balance-alb" | "balance-rr";
 
@@ -164,6 +242,57 @@ export function interfacesFor(nics: NicInfo[], bonds: BondConfig[]): InterfaceRe
       label: `${b.name} — ${b.nicIndices.map((idx) => `nic ${idx + 1} (${nics[idx]?.name ?? "?"})`).join(" + ")} (${bondModeLabel(b.mode)})`,
     }));
   return [...nicRefs, ...bondRefs];
+}
+
+export const NIC_PORT_LABEL: Record<NicPort, string> = {
+  rj45: "rj45",
+  sfp: "sfp",
+  "sfp+": "sfp+",
+  sfp28: "sfp28",
+  qsfp28: "qsfp28",
+};
+
+/** why a connector matters, for the one-line hint beside the choice */
+export function portHint(speed: NicSpeed, port: NicPort): string {
+  if (speed === "10gbe" && port === "sfp+") return "a dac cable or fiber module — the usual homelab 10g choice, cool and cheap to cable";
+  if (speed === "10gbe" && port === "rj45") return "10gbase-t over copper — plain cat6a, but runs hot and needs rj45 10g switch ports";
+  if (port === "rj45") return "the usual copper port — any switch takes it";
+  if (port === "sfp") return "a 1g fiber or copper module in an sfp cage";
+  if (port === "sfp28") return "a 25g dac or fiber module";
+  return "a 4-lane cage, split into several ports with a breakout cable";
+}
+
+/**
+ * The connectors a nic of this speed actually comes with, most common
+ * first — the first entry is the default. A speed with one connector is
+ * never asked about; "other / not sure" isn't either, since someone unsure
+ * of the speed won't know the connector.
+ */
+export function portChoices(speed: NicSpeed): NicPort[] {
+  switch (speed) {
+    case "1gbe":
+      return ["rj45", "sfp"];
+    case "2.5gbe":
+      return ["rj45"];
+    case "10gbe":
+      return ["sfp+", "rj45"];
+    case "25gbe":
+      return ["sfp28", "qsfp28"];
+    case "other":
+      return [];
+  }
+}
+
+/**
+ * The connector in effect: the visitor's choice when it fits the speed,
+ * otherwise the usual one for that speed, or null when the speed is
+ * unknown. Read-side only — a choice made at one speed is kept, and comes
+ * back if the speed returns to one it fits.
+ */
+export function effectivePort(nic: Pick<NicInfo, "speed" | "port">): NicPort | null {
+  const choices = portChoices(nic.speed);
+  if (nic.port && choices.includes(nic.port)) return nic.port;
+  return choices[0] ?? null;
 }
 
 // Ceph's practical floor is 10gbe. Below it a single osd backfill
@@ -249,7 +378,7 @@ export function nicSpeedLabel(speed: NicSpeed): string {
 // it) changes — a mismatched version is discarded wholesale rather than
 // risking a crash or a half-applied state from an older save.
 export const STORAGE_KEY = "proxmox-computer:setup-wizard";
-export const STORAGE_VERSION = 7;
+export const STORAGE_VERSION = 11;
 
 export interface PersistedState {
   version: number;
@@ -265,7 +394,11 @@ export interface PersistedState {
   nodes: NodeInfo[];
   identicalHardware: boolean;
   identicalNetwork: boolean;
-  storageHaMode: StorageHaMode;
+  clusterStorage: ClusterStorage;
+  storage: StoragePlan;
+  // keeps every node's disk roles in step — the same bargain
+  // identicalNetwork strikes for bridges
+  identicalStorage: boolean;
 }
 
 // deliberately not exhaustive — every individual field getting checked would
@@ -277,7 +410,7 @@ export function isPersistedState(value: unknown): value is PersistedState {
   if (!value || typeof value !== "object") return false;
   const v = value as Record<string, unknown>;
   if (v.version !== STORAGE_VERSION) return false;
-  if (v.currentStep !== "hardware" && v.currentStep !== "network") return false;
+  if (v.currentStep !== "hardware" && v.currentStep !== "network" && v.currentStep !== "storage") return false;
   if (typeof v.nodeCount !== "string") return false;
   if (typeof v.hostnameSuffix !== "string") return false;
   if (typeof v.globalCidr !== "string") return false;
@@ -285,7 +418,15 @@ export function isPersistedState(value: unknown): value is PersistedState {
   if (typeof v.homelabVlan !== "string") return false;
   if (typeof v.identicalHardware !== "boolean") return false;
   if (typeof v.identicalNetwork !== "boolean") return false;
-  if (v.storageHaMode !== "ceph" && v.storageHaMode !== "zfs-replication" && v.storageHaMode !== "none") return false;
+  if (typeof v.identicalStorage !== "boolean") return false;
+  if (!v.storage || typeof v.storage !== "object") return false;
+  const storage = v.storage as Record<string, unknown>;
+  for (const section of ["ceph", "zfs", "local"]) {
+    if (!storage[section] || typeof storage[section] !== "object") return false;
+  }
+  if (!v.clusterStorage || typeof v.clusterStorage !== "object") return false;
+  const cs = v.clusterStorage as Record<string, unknown>;
+  if (typeof cs.ceph !== "boolean" || typeof cs.zfs !== "boolean") return false;
   if (!Array.isArray(v.nodes)) return false;
 
   for (const node of v.nodes) {
@@ -295,6 +436,9 @@ export function isPersistedState(value: unknown): value is PersistedState {
     if (typeof n.cpuVendor !== "string") return false;
     if (typeof n.cpuFamily !== "string") return false;
     if (!Array.isArray(n.nics)) return false;
+    for (const nic of n.nics as Record<string, unknown>[]) {
+      if (!nic || typeof nic.speed !== "string" || typeof nic.port !== "string") return false;
+    }
     if (!Array.isArray(n.additionalDisks)) return false;
 
     if (!n.network || typeof n.network !== "object") return false;
