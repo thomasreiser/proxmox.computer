@@ -1,7 +1,7 @@
 "use client";
 
 import { Handle, Position, type Node, type NodeProps } from "@xyflow/react";
-import type { NodeTopology } from "./topology";
+import { cephCableCount, type NodeTopology } from "./topology";
 
 export type SwitchNodeData = { name: string; topologies: NodeTopology[] };
 export type SwitchNodeType = Node<SwitchNodeData, "switch">;
@@ -15,21 +15,34 @@ export type SwitchNodeType = Node<SwitchNodeData, "switch">;
 // anything computed per cable.
 export function SwitchNode({ data }: NodeProps<SwitchNodeType>) {
   const { name, topologies } = data;
+  const cephPorts = cephCableCount(topologies);
 
   return (
     <div className="pc-switch">
       <div className="pc-switch__head">
         <span className="code pc-switch__name">{name}</span>
-        <span className="meta pc-switch__value--dim">
-          {topologies.reduce((n, t) => n + t.cables.length, 0)} ports
-        </span>
+        <div className="pc-switch__headmeta">
+          {cephPorts > 0 && (
+            <span className="meta pc-switch__ceph">
+              <span className="pc-switch__cephmark" aria-hidden="true" />
+              {cephPorts} ceph — keep on this one switch
+            </span>
+          )}
+          <span className="meta pc-switch__value--dim">
+            {topologies.reduce((n, t) => n + t.cables.length, 0)} ports
+          </span>
+        </div>
       </div>
       <div className="pc-switch__groups">
         {topologies.map((topology) => (
           <div key={topology.nodeIndex} className="pc-switch__group">
             <div className="pc-switch__ports">
               {topology.cables.map((cable) => (
-                <div key={cable.id} className="pc-switch__portbox" title={`${topology.node.name} — ${cable.nicName}`}>
+                <div
+                  key={cable.id}
+                  className={`pc-switch__portbox${cable.iface.carriesCeph ? " pc-switch__portbox--ceph" : ""}`}
+                  title={`${topology.node.name} — ${cable.nicName}${cable.iface.carriesCeph ? " — ceph" : ""}`}
+                >
                   <Handle
                     type="target"
                     position={Position.Top}

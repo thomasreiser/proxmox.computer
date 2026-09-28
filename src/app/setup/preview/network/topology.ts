@@ -9,6 +9,7 @@ import {
   bridgeKey,
   interfacesFor,
   needsHostIpForPurposes,
+  nicIndicesForInterface,
   type InterfacePurpose,
   type NicSpeed,
   type NodeInfo,
@@ -62,6 +63,11 @@ export interface InterfaceTopology {
   colorVar: string;
   bridges: BridgeSummary[];
   isManagement: boolean;
+  // this link carries ceph replication traffic, which is the one purpose
+  // with a physical-layout consequence the diagram can actually show: every
+  // ceph port in the cluster has to land on one switch (see cephNote in
+  // ./page.tsx), so the drawing marks them at both ends of the cable.
+  carriesCeph: boolean;
 }
 
 export interface CableInfo {
@@ -179,7 +185,7 @@ export function buildClusterTopology(nodes: NodeInfo[], ctx: ClusterContext): No
       const isBond = ref.id.startsWith("bond-");
       const bondIndex = isBond ? Number(ref.id.slice("bond-".length)) : -1;
       const bondConfig = isBond ? node.network.bonds[bondIndex] : undefined;
-      const nicIndices = bondConfig ? bondConfig.nicIndices : [Number(ref.id.slice("nic-".length))];
+      const nicIndices = nicIndicesForInterface(ref.id, node.network.bonds);
 
       const colorVar = bondConfig ? `var(${BOND_COLORS[bondColorCount++ % BOND_COLORS.length]})` : NEUTRAL_CABLE_COLOR;
       // a bond's own vlan tag, when set, means this bond's link is itself
@@ -225,6 +231,7 @@ export function buildClusterTopology(nodes: NodeInfo[], ctx: ClusterContext): No
         colorVar,
         bridges,
         isManagement,
+        carriesCeph: bridges.some((b) => b.purposes.includes("ceph")),
       };
     });
 
@@ -252,6 +259,7 @@ export function buildClusterTopology(nodes: NodeInfo[], ctx: ClusterContext): No
         colorVar: NEUTRAL_CABLE_COLOR,
         bridges: [],
         isManagement: false,
+        carriesCeph: false,
       },
     }));
 
@@ -265,4 +273,11 @@ export function buildClusterTopology(nodes: NodeInfo[], ctx: ClusterContext): No
       cables,
     };
   });
+}
+
+// how many physical links in the whole cluster carry ceph — drives both
+// the summary strip and whether the "keep these on one switch" note is
+// worth showing at all.
+export function cephCableCount(topologies: NodeTopology[]): number {
+  return topologies.reduce((n, t) => n + t.cables.filter((c) => c.iface.carriesCeph).length, 0);
 }

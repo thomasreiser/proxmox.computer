@@ -166,6 +166,38 @@ export function interfacesFor(nics: NicInfo[], bonds: BondConfig[]): InterfaceRe
   return [...nicRefs, ...bondRefs];
 }
 
+// Ceph's practical floor is 10gbe. Below it a single osd backfill
+// saturates the link, and because every write is replicated before it's
+// acknowledged, that shows up as cluster-wide vm disk stalls rather than
+// as "storage is a bit slow". "other" is deliberately neither fast nor
+// slow: an unknown nic can't earn a warning, and can't clear one either.
+export function isFastNic(speed: NicSpeed): boolean {
+  return speed === "10gbe" || speed === "25gbe";
+}
+
+export function isSlowNic(speed: NicSpeed): boolean {
+  return speed === "1gbe" || speed === "2.5gbe";
+}
+
+// which physical nics sit behind one interface id — the bond's members, or
+// the single nic it names. shared by the wizard (which needs the speeds
+// behind a bridge) and the preview's topology builder.
+export function nicIndicesForInterface(interfaceId: string, bonds: BondConfig[]): number[] {
+  if (interfaceId.startsWith("bond-")) {
+    const index = Number(interfaceId.slice("bond-".length));
+    return bonds[index]?.nicIndices ?? [];
+  }
+  return [Number(interfaceId.slice("nic-".length))];
+}
+
+// the speeds behind an interface, in member order — [] when the id names a
+// bond that no longer exists, or a nic index that's been trimmed away.
+export function nicSpeedsForInterface(interfaceId: string, nics: NicInfo[], bonds: BondConfig[]): NicSpeed[] {
+  return nicIndicesForInterface(interfaceId, bonds)
+    .map((i) => nics[i]?.speed)
+    .filter((s): s is NicSpeed => s !== undefined);
+}
+
 // a bridge's storage key is "<interfaceId>#<index>" — index 0 is the
 // interface's native/untagged bridge, 1+ are extra vlan-tagged siblings.
 export function bridgeKey(interfaceId: string, index: number): string {

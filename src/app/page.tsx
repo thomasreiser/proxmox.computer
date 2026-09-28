@@ -24,9 +24,14 @@ export default function Home() {
               proxmox<span className="text-accent">.computer</span>
             </span>
           </Link>
-          <a href="https://github.com" className="meta text-ink-muted transition-colors hover:text-ink">
-            github
-          </a>
+          <nav className="flex items-center gap-5">
+            <Link href="/how-it-works" className="meta text-ink-muted transition-colors hover:text-ink">
+              how it works
+            </Link>
+            <a href="https://github.com/thomasreiser/proxmox.computer" className="meta text-ink-muted transition-colors hover:text-ink">
+              github
+            </a>
+          </nav>
         </div>
       </header>
 
@@ -50,9 +55,9 @@ export default function Home() {
                 start the setup
                 <span className="pc-btn__bracket">]</span>
               </Link>
-              <a href="#asks" className="pc-btn pc-btn--ghost">
-                see what it asks →
-              </a>
+              <Link href="/how-it-works" className="pc-btn pc-btn--ghost">
+                see how it works →
+              </Link>
             </div>
           </div>
         </section>

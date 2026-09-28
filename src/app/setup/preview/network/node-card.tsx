@@ -105,7 +105,12 @@ export function NetworkNodeCard({ data }: NodeProps<NetworkNodeCardNode>) {
           it stays true no matter how tall the info above gets. */}
       <div className="pc-netcard__portstrip">
         {topology.cables.map((cable) => (
-          <div key={cable.id} className="pc-netcard__portbox" style={{ borderColor: cable.iface.colorVar }}>
+          <div
+            key={cable.id}
+            className={`pc-netcard__portbox${cable.iface.carriesCeph ? " pc-netcard__portbox--ceph" : ""}`}
+            style={{ borderColor: cable.iface.colorVar }}
+            title={cable.iface.carriesCeph ? `${cable.nicName} — ceph` : cable.nicName}
+          >
             <span className="meta pc-netcard__portboxlabel">{cable.nicName}</span>
             <Handle
               type="source"

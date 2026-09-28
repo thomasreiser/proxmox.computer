@@ -17,7 +17,7 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { loadPersistedState, type PersistedState } from "../../wizard-state";
-import { buildClusterTopology, distinctVlanTags, type NodeTopology } from "./topology";
+import { buildClusterTopology, cephCableCount, distinctVlanTags, type NodeTopology } from "./topology";
 import { NetworkNodeCard, type NetworkNodeCardNode } from "./node-card";
 import { SwitchNode, type SwitchNodeType } from "./switch-node";
 
@@ -273,6 +273,7 @@ export default function NetworkPreview() {
     [saved, homelabVlan, hostnameSuffix],
   );
   const totalCables = topologies.reduce((n, t) => n + t.cables.length, 0);
+  const cephCables = cephCableCount(topologies);
 
   return (
     <div className="pc-root flex min-h-full flex-col">
@@ -304,7 +305,8 @@ export default function NetworkPreview() {
               address each one sits on — <span className="code">node ip</span>{" "}
               is an address the host itself answers on,{" "}
               <span className="code">serves</span> is only the subnet that
-              bridge switches for its vms.
+              bridge switches for its vms. Ports carrying ceph are marked at
+              both ends — those all have to land on one switch.
             </p>
           </div>
 
@@ -325,6 +327,12 @@ export default function NetworkPreview() {
               <div className="pc-summary__cell">
                 <span className="label pc-summary__key">vlans in use</span>
                 <span className="code pc-summary__val">{countDistinctVlans(topologies) || "—"}</span>
+              </div>
+              <div className="pc-summary__cell">
+                <span className="label pc-summary__key">ceph links</span>
+                <span className={`code pc-summary__val ${cephCables ? "pc-summary__val--ceph" : ""}`}>
+                  {cephCables || "—"}
+                </span>
               </div>
             </div>
           )}
@@ -356,6 +364,33 @@ export default function NetworkPreview() {
           <ReactFlowProvider>
             <NetworkCanvas topologies={topologies} hydrated={hydrated} hasSaved={!!saved} />
           </ReactFlowProvider>
+
+          {/* the one thing this diagram asserts about physical layout. it's
+              drawn with a single switch on purpose, and that's exactly the
+              constraint ceph imposes — worth saying out loud, because a
+              visitor with two switches will otherwise split these ports
+              across both without realising what it costs. */}
+          {hydrated && cephCables > 0 && (
+            <div className="pc-callout pc-callout--warning">
+              <span className="code pc-callout__glyph">⚠</span>
+              <div className="pc-callout__body">
+                <p className="body pc-callout__title">
+                  all {cephCables} ceph links belong on the same physical switch
+                </p>
+                <p className="body pc-callout__text text-ink-muted">
+                  They&apos;re marked above, at both ends of every cable. Ceph
+                  replicates each write to the other nodes and waits for them
+                  before acknowledging it, so every write pays for the slowest
+                  hop between any two nodes. Split these ports across two
+                  switches and every one of those writes crosses the uplink
+                  between them — one shared link carrying all storage traffic,
+                  plus a switch hop of latency on top. Management, vm and
+                  backup links can go wherever you like; keep the ceph ports
+                  together, on one switch, ideally on one asic.
+                </p>
+              </div>
+            </div>
+          )}
 
           <div className="pc-stepflow__nav">
             <Link href="/setup" className="pc-btn pc-btn--ghost">

@@ -468,3 +468,174 @@ body {
 .pc-switch__ports { width: var(--netcard-w); box-sizing: border-box; display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; padding: var(--space-4) 0; }
 .pc-switch__portbox { position: relative; height: 20px; margin: 0 3px; border: 1px solid var(--border-strong); background: var(--surface-300); }
 .pc-canvas .pc-switch__plug { width: 8px; height: 8px; top: -5px; border-radius: var(--radius-none); border: 1px solid var(--surface-200); background: var(--border-strong); }
+
+/* ================= how-it-works pipeline ================= */
+/* Same react flow canvas as the previews (it inherits every --xy-* mapping
+   from .pc-canvas above), but drawing a fixed seven-phase process rather than a
+   visitor's saved topology — so it's taller, and its cards carry prose
+   instead of measurements. */
+.pc-canvas--pipeline { height: min(78vh, 780px); }
+
+/* react flow renders an edge's label as svg text, which doesn't inherit
+   the page font the way the html nodes do — these two rules are what keep
+   the artifact names (answer.toml, homelab.zip, …) in the same mono face
+   as everything around them. */
+.pc-canvas .react-flow__edge-text { font-family: var(--font-mono); font-size: 11px; fill: var(--ink); }
+.pc-canvas .react-flow__edge-textbg { fill: var(--surface-300); }
+
+/* A phase card. The accent tells you which lane it belongs to at a glance,
+   which is the diagram's whole point — brand for the half that runs in the
+   browser, accent for the half that runs on real hardware. */
+.pc-phase { border: 1px solid var(--border-strong); background: var(--surface-200); box-shadow: var(--inset-hairline); }
+.pc-phase__head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); padding: var(--space-2) var(--space-3); border-bottom: 1px solid var(--border-strong); background: var(--surface-400); }
+.pc-phase__step { font-size: 13px; font-weight: 700; letter-spacing: 0.04em; }
+.pc-phase__where { color: var(--ink-dim); text-transform: uppercase; letter-spacing: 0.06em; font-size: 10px; }
+.pc-phase__body { display: flex; flex-direction: column; gap: var(--space-1); padding: var(--space-3); }
+.pc-phase__title { margin: 0; }
+.pc-phase__tagline { color: var(--ink-muted); margin: 0 0 var(--space-2) 0; }
+.pc-phase__list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-1); }
+.pc-phase__item { display: flex; align-items: flex-start; gap: var(--space-2); color: var(--ink-muted); }
+.pc-phase__marker { flex: none; }
+/* the 4px stripe down the left edge is the lane tell that survives being
+   zoomed out past the point where any text is legible. */
+.pc-phase--browser { border-left: 4px solid var(--brand); }
+.pc-phase--browser .pc-phase__step { color: var(--brand); }
+.pc-phase--browser .pc-phase__marker { color: var(--brand); }
+.pc-phase--node { border-left: 4px solid var(--accent); }
+.pc-phase--node .pc-phase__step { color: var(--accent); }
+.pc-phase--node .pc-phase__marker { color: var(--accent); }
+/* purely logical flows — the arrowheads say where a line begins and ends,
+   so an anchor never needs to be seen (a physical cable in the network
+   preview draws a real plug, because there the port IS the subject). */
+.pc-canvas .pc-phase__anchor { opacity: 0; width: 1px; height: 1px; min-width: 0; min-height: 0; border: 0; pointer-events: none; }
+
+/* The two lanes behind the cards — territory, not decoration: which side
+   of the "nothing here logs into your servers" line a phase runs on is the
+   single fact the diagram exists to make obvious. */
+.pc-lane { border: 1px dashed var(--border); background: var(--surface-200); opacity: 0.55; }
+.pc-lane__head { display: flex; flex-direction: column; gap: var(--space-1); padding: var(--space-3) var(--space-4); }
+.pc-lane__label { color: var(--ink-muted); }
+.pc-lane__hint { color: var(--ink-dim); }
+.pc-lane--browser { border-color: var(--brand); }
+.pc-lane--browser .pc-lane__label { color: var(--brand); }
+.pc-lane--node { border-color: var(--accent); }
+.pc-lane--node .pc-lane__label { color: var(--accent); }
+
+/* Legend for the canvas above — the three line styles mean three quite
+   different things, and the distinction (especially "crosses the line")
+   is worth spelling out once rather than leaving to be inferred. */
+.pc-legend { display: flex; flex-wrap: wrap; border: 1px solid var(--border); background: var(--surface-200); }
+.pc-legend__item { flex: 1 1 220px; display: flex; align-items: flex-start; gap: var(--space-3); padding: var(--space-3) var(--space-4); border-right: 1px solid var(--border); }
+.pc-legend__item:last-child { border-right: 0; }
+.pc-legend__line { flex: none; width: 24px; height: 0; margin-top: 8px; border-top-width: 2px; }
+.pc-legend__line--handoff { border-top-style: solid; border-top-color: var(--brand); }
+.pc-legend__line--step { border-top-style: solid; border-top-color: var(--border-strong); }
+.pc-legend__line--loop { border-top-style: dashed; border-top-color: var(--accent); }
+.pc-legend__text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.pc-legend__label { color: var(--ink); }
+.pc-legend__hint { color: var(--ink-muted); }
+
+/* .pc-table above sets white-space: nowrap so a table of short values never
+   ragged-wraps; a table whose last column is a full sentence needs the
+   opposite, and needs the whole thing to stop being horizontally scrollable. */
+.pc-table-wrap--wrap { overflow-x: visible; }
+.pc-table--wrap td { white-space: normal; vertical-align: top; }
+.pc-table--wrap td:first-child { white-space: nowrap; }
+.pc-table--wrap th { white-space: nowrap; }
+
+/* The step roster: the key that makes every later "step 05" on the page
+   mean something, built from the same PHASES the canvas draws. One grid
+   for the whole list rather than one per row — with the rows set to
+   display: contents, all four columns size themselves against every row at
+   once, so the phase names and the in-browser/on-nodes column line up
+   without a single hardcoded width. */
+.pc-roster { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: max-content max-content max-content 1fr; border-top: 1px solid var(--border); }
+.pc-roster__item { display: contents; }
+.pc-roster__cell { padding: var(--space-3) var(--space-5) var(--space-3) 0; border-bottom: 1px solid var(--border); }
+.pc-roster__cell--step { font-size: 13px; font-weight: 700; letter-spacing: 0.04em; }
+.pc-roster__cell--title { color: var(--ink); font-weight: 700; }
+.pc-roster__cell--where { text-transform: uppercase; letter-spacing: 0.06em; font-size: 10px; }
+.pc-roster__cell--what { color: var(--ink-muted); padding-right: 0; }
+/* the same two hues the diagram's lanes and card stripes use — the number
+   itself is the thing a reader looks up, so it carries the side. */
+.pc-roster__step--browser { color: var(--brand); }
+.pc-roster__step--node { color: var(--accent); }
+.pc-roster__where--browser { color: var(--brand); }
+.pc-roster__where--node { color: var(--accent); }
+
+/* Four text columns don't fit a phone. Below this the last two cells drop
+   onto their own lines under the title, which is why they're pinned to
+   column 2 — left to auto-placement they'd land back under the number. */
+@media (max-width: 720px) {
+  .pc-roster { grid-template-columns: max-content 1fr; }
+  .pc-roster__cell { border-bottom: 0; padding: 0 0 var(--space-1) 0; }
+  .pc-roster__cell--step { padding-right: var(--space-3); }
+  .pc-roster__cell--where { grid-column: 2; }
+  .pc-roster__cell--what { grid-column: 2; padding-bottom: var(--space-4); border-bottom: 1px solid var(--border); }
+}
+
+/* File tree, drawn with borders rather than ├ │ └ characters. Box-drawing
+   glyphs only tile into unbroken lines when the line box equals the glyph's
+   design cell, so .code's 22px line-height at 14px left ~8px of unpainted
+   leading between every row — and ├ vs │ can resolve to different faces
+   down the ui-monospace fallback chain, putting them at different x. Every
+   connector here is a 1px border on a fixed-size box instead, so the lines
+   meet exactly, at any font, in either theme. */
+.pc-tree { --tree-row: 26px; --tree-indent: 22px; --tree-stem: 7px; display: grid; grid-template-columns: max-content max-content; column-gap: var(--space-5); width: max-content; font-family: var(--font-mono); font-size: 14px; }
+.pc-tree__row { display: contents; }
+.pc-tree__entry { display: flex; align-items: center; height: var(--tree-row); white-space: nowrap; }
+.pc-tree__note { display: flex; align-items: center; height: var(--tree-row); color: var(--ink-muted); font-size: 13px; white-space: nowrap; }
+
+/* one guide column per ancestor level. --trunk means that ancestor still
+   has children below this row, so its line passes straight through. */
+.pc-tree__guide { position: relative; flex: none; width: var(--tree-indent); align-self: stretch; }
+.pc-tree__guide--trunk::before,
+.pc-tree__guide--elbow::before {
+  content: "";
+  position: absolute;
+  left: var(--tree-stem);
+  top: 0;
+  bottom: 0;
+  border-left: 1px solid var(--border-strong);
+}
+/* the elbow's horizontal arm, landing on the row's exact vertical centre —
+   which is why the row has a fixed height rather than an intrinsic one. */
+.pc-tree__guide--elbow::after {
+  content: "";
+  position: absolute;
+  left: var(--tree-stem);
+  top: calc(var(--tree-row) / 2);
+  width: calc(var(--tree-indent) - var(--tree-stem) - 3px);
+  border-top: 1px solid var(--border-strong);
+}
+/* a last child: its stem stops at the arm instead of carrying on down */
+.pc-tree__guide--stop::before { bottom: auto; height: calc(var(--tree-row) / 2); }
+
+.pc-tree__name { color: var(--ink); padding-left: var(--space-2); }
+.pc-tree__name--marked { color: var(--brand); font-weight: 700; }
+
+/* Ceph's two speed caveats, and the one physical-layout rule the network
+   preview can actually show. Marked in --warning, which nothing else in
+   the diagram uses: the bond palette (--cable-a..d) is non-semantic by
+   design, and --accent already names the switch. */
+.pc-radio__warnmark { color: var(--warning); margin-left: var(--space-2); }
+.pc-radio__warntext { display: block; color: var(--warning); margin-top: var(--space-1); }
+
+/* a port carrying ceph, marked identically at both ends of its cable —
+   the node card's port strip and the switch's matching port box. the bond
+   color stays on the border (set inline, it groups the cable), so this
+   claims the fill instead of fighting for the same edge. */
+.pc-netcard__portbox--ceph,
+.pc-switch__portbox--ceph { background: color-mix(in srgb, var(--warning) 22%, var(--surface-300)); box-shadow: inset 0 0 0 1px var(--warning); }
+.pc-netcard__portbox--ceph .pc-netcard__portboxlabel { color: var(--ink); }
+
+.pc-switch__headmeta { display: flex; align-items: baseline; gap: var(--space-4); }
+.pc-switch__ceph { display: inline-flex; align-items: center; gap: var(--space-2); color: var(--warning); }
+.pc-switch__cephmark { width: 8px; height: 8px; flex: none; background: color-mix(in srgb, var(--warning) 22%, var(--surface-300)); box-shadow: inset 0 0 0 1px var(--warning); }
+.pc-summary__val--ceph { color: var(--warning); }
+
+/* An external reference inside body copy — brand-colored and underlined so
+   it reads as a link in a layout that otherwise has very few. */
+.pc-link { color: var(--brand); text-decoration: underline; text-underline-offset: 2px; text-decoration-color: var(--border-strong); }
+.pc-link:hover { text-decoration-color: var(--brand); }
+.pc-link:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
