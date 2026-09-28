@@ -14,8 +14,10 @@ import {
   loadPersistedState,
   MAX_BRIDGES_PER_INTERFACE,
   MAX_NICS_PER_NODE,
+  needsHostIpForPurposes,
   nicSpeedLabel,
   nicSpeedOptions,
+  PURPOSE_NEEDS_HOST_IP,
   STORAGE_KEY,
   STORAGE_VERSION,
   type AdditionalDisk,
@@ -49,47 +51,40 @@ function defaultAdditionalDisk(index: number): AdditionalDisk {
 interface PurposeInfo {
   value: InterfacePurpose;
   label: string;
-  // true = this purpose always needs a real host address; false = never
-  // (pure vm/ct switch); null = "other" — ask the visitor directly.
-  needsHostIp: boolean | null;
   hint: string;
 }
 
+// whether each of these needs a host address isn't repeated here — it's
+// PURPOSE_NEEDS_HOST_IP in wizard-state, shared with the preview.
 const INTERFACE_PURPOSE_OPTIONS: PurposeInfo[] = [
   {
     value: "vm",
     label: "vm / container traffic",
-    needsHostIp: false,
     hint: "a pure switch — vms and cts get their own ips, the host doesn't need one here",
   },
   {
     value: "ceph",
     label: "ceph / storage traffic",
-    needsHostIp: true,
     hint: "the host's ceph client (and osds, if this node runs any) need a real address here",
   },
   {
     value: "zfs",
     label: "zfs replication traffic",
-    needsHostIp: true,
     hint: "the host needs an address here for zfs send/receive replication to the other nodes",
   },
   {
     value: "backup",
     label: "backups",
-    needsHostIp: true,
     hint: "the host needs an address here to reach the backup target",
   },
   {
     value: "cluster",
     label: "cluster sync (corosync)",
-    needsHostIp: true,
     hint: "the host needs an address here for corosync ring traffic",
   },
   {
     value: "other",
     label: "other",
-    needsHostIp: null,
     hint: "pick whether the node itself needs an address here",
   },
 ];
@@ -106,21 +101,12 @@ function purposesUsedForLabel(purposes: InterfacePurpose[]): string {
   return purposes.map((p) => purposeInfoFor(p).label).join(", ");
 }
 
-// a real nic/bridge often earns its keep serving more than one purpose at
-// once (vm traffic + corosync is a completely normal homelab setup) — so
-// this is a set, not a single choice. it's still enforced to be non-empty
-// in the UI (there's always at least one reason a bridge exists).
-function needsHostIpForPurposes(purposes: InterfacePurpose[], otherNeedsHostIp: boolean): boolean {
-  return purposes.some((p) => purposeInfoFor(p).needsHostIp ?? otherNeedsHostIp);
-}
-
 // combines the "why" from every selected purpose that actually requires a
 // host address, so the field hint reflects all of them, not just one.
 function requiredIpHintFor(purposes: InterfacePurpose[], otherNeedsHostIp: boolean): string {
   return purposes
-    .map((p) => purposeInfoFor(p))
-    .filter((info) => info.needsHostIp === true || (info.needsHostIp === null && otherNeedsHostIp))
-    .map((info) => info.hint)
+    .filter((p) => PURPOSE_NEEDS_HOST_IP[p] ?? otherNeedsHostIp)
+    .map((p) => purposeInfoFor(p).hint)
     .join("; ");
 }
 

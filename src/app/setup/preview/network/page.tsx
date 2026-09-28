@@ -23,7 +23,10 @@ import { SwitchNode, type SwitchNodeType } from "./switch-node";
 
 const nodeTypes = { networkNode: NetworkNodeCard, switch: SwitchNode };
 
-const CARD_WIDTH = 320;
+// mirrors --netcard-w / --netcard-gap in globals.css — the switch's port
+// groups are laid out from those, and a cable only stays straight while
+// both ends agree. change one, change the other.
+const CARD_WIDTH = 440;
 const GAP = 64;
 const SWITCH_NAME = "switch-01";
 
@@ -34,10 +37,10 @@ const SWITCH_NAME = "switch-01";
 // wildly wrong (a card can now be quite tall: one interface may list up to
 // MAX_BRIDGES_PER_INTERFACE bridges).
 function estimateHeight(topology: NodeTopology): number {
-  let h = 146; // header + the dedicated port strip at the bottom
+  let h = 180; // two-line header + the dedicated port strip at the bottom
   for (const iface of topology.interfaces) {
-    const bridgeLines = Math.max(1, iface.bridges.length);
-    h += 24 + (iface.bond ? 30 : 0) + bridgeLines * 22 + iface.nicIndices.length * 28;
+    const bridgeBlocks = Math.max(1, iface.bridges.length);
+    h += 24 + (iface.bond ? 30 : 0) + bridgeBlocks * 58 + iface.nicIndices.length * 28;
   }
   return h;
 }
@@ -264,9 +267,10 @@ export default function NetworkPreview() {
   /* eslint-enable react-hooks/set-state-in-effect */
 
   const homelabVlan = saved?.homelabVlan ? Number(saved.homelabVlan) || null : null;
+  const hostnameSuffix = saved?.hostnameSuffix ?? "";
   const topologies = useMemo(
-    () => (saved ? buildClusterTopology(saved.nodes, homelabVlan) : []),
-    [saved, homelabVlan],
+    () => (saved ? buildClusterTopology(saved.nodes, { homelabVlan, hostnameSuffix }) : []),
+    [saved, homelabVlan, hostnameSuffix],
   );
   const totalCables = topologies.reduce((n, t) => n + t.cables.length, 0);
 
@@ -296,7 +300,11 @@ export default function NetworkPreview() {
             <p className="body pc-stepflow__intro">
               Every nic, cabled to {SWITCH_NAME}. Matching colors mean the same
               bond — every member still gets its own cable. Each node card
-              lists the bridges and vlans its interfaces actually carry.
+              lists the bridges its interfaces carry, with the vlan and the
+              address each one sits on — <span className="code">node ip</span>{" "}
+              is an address the host itself answers on,{" "}
+              <span className="code">serves</span> is only the subnet that
+              bridge switches for its vms.
             </p>
           </div>
 
@@ -317,6 +325,30 @@ export default function NetworkPreview() {
               <div className="pc-summary__cell">
                 <span className="label pc-summary__key">vlans in use</span>
                 <span className="code pc-summary__val">{countDistinctVlans(topologies) || "—"}</span>
+              </div>
+            </div>
+          )}
+
+          {/* the cluster-wide addressing facts every card above is
+              relative to — kept out of the canvas so they stay readable at
+              any zoom, and off the cards so they aren't repeated per node. */}
+          {hydrated && saved && topologies.length > 0 && (
+            <div className="pc-summary">
+              <div className="pc-summary__cell">
+                <span className="label pc-summary__key">homelab network</span>
+                <span className="code pc-summary__val pc-summary__val--sm">{saved.globalCidr || "—"}</span>
+              </div>
+              <div className="pc-summary__cell">
+                <span className="label pc-summary__key">gateway</span>
+                <span className="code pc-summary__val pc-summary__val--sm">{saved.gateway || "—"}</span>
+              </div>
+              <div className="pc-summary__cell">
+                <span className="label pc-summary__key">native vlan</span>
+                <span className="code pc-summary__val pc-summary__val--sm">{homelabVlan ?? "untagged"}</span>
+              </div>
+              <div className="pc-summary__cell">
+                <span className="label pc-summary__key">domain</span>
+                <span className="code pc-summary__val pc-summary__val--sm">{hostnameSuffix || "—"}</span>
               </div>
             </div>
           )}

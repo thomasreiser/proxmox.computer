@@ -64,6 +64,30 @@ export interface BridgeConfig {
   vlanTag: string;
 }
 
+// whether the node itself claims an address on a bridge serving this
+// purpose: true = always, false = never (a pure vm/ct switch), null =
+// "other", which is ambiguous enough that the visitor answers it per
+// bridge (BridgeConfig.otherNeedsHostIp). this lives here rather than
+// beside the form's purpose copy because it decides what a bridge's `ip`
+// field actually holds — the node's own address, or just the subnet the
+// bridge switches for its guests — and the preview has to read that field
+// the same way the form wrote it.
+export const PURPOSE_NEEDS_HOST_IP: Record<InterfacePurpose, boolean | null> = {
+  vm: false,
+  ceph: true,
+  zfs: true,
+  backup: true,
+  cluster: true,
+  other: null,
+};
+
+// a real nic/bridge often earns its keep serving more than one purpose at
+// once (vm traffic + corosync is a completely normal homelab setup), so
+// one purpose needing a host address is enough for the whole bridge to.
+export function needsHostIpForPurposes(purposes: InterfacePurpose[], otherNeedsHostIp: boolean): boolean {
+  return purposes.some((p) => PURPOSE_NEEDS_HOST_IP[p] ?? otherNeedsHostIp);
+}
+
 // the cluster-wide decision of how vm/ct storage stays available across
 // nodes — drives whether "ceph" or "zfs replication" is even offered as a
 // nic purpose, and only matters once there's more than 1 node.

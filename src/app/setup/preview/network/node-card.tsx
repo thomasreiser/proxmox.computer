@@ -2,20 +2,32 @@
 
 import { Handle, Position, type Node, type NodeProps } from "@xyflow/react";
 import { nicSpeedLabel } from "../../wizard-state";
-import { bridgeSummaryLabel, type NodeTopology } from "./topology";
+import { addressKindLabel, bridgePurposesLabel, vlanLabel, type NodeTopology } from "./topology";
 
 export type NetworkNodeCardData = { topology: NodeTopology };
 export type NetworkNodeCardNode = Node<NetworkNodeCardData, "networkNode">;
 
 export function NetworkNodeCard({ data }: NodeProps<NetworkNodeCardNode>) {
   const { topology } = data;
-  const { node, nodeIndex, interfaces } = topology;
+  const { node, nodeIndex, interfaces, fqdn, managementAddress } = topology;
 
   return (
     <div className="pc-netcard">
       <div className="pc-netcard__head">
-        <span className="code pc-netcard__host">{node.network.hostLabel || node.name}</span>
-        <span className="meta pc-netcard__index">node {String(nodeIndex + 1).padStart(2, "0")}</span>
+        <div className="pc-netcard__headrow">
+          <span className="code pc-netcard__host">{fqdn}</span>
+          <span className="meta pc-netcard__index">node {String(nodeIndex + 1).padStart(2, "0")}</span>
+        </div>
+        {/* the web ui / ssh address, called out on its own line: it's the
+            one number a visitor comes to this diagram looking for. */}
+        <div className="pc-netcard__headrow">
+          <span className="meta pc-netcard__headkey">mgmt</span>
+          <span
+            className={`code pc-netcard__headaddr ${managementAddress ? "" : "pc-netcard__headaddr--unset"}`}
+          >
+            {managementAddress || "no ip set"}
+          </span>
+        </div>
       </div>
 
       <div className="pc-netcard__body">
@@ -44,14 +56,30 @@ export function NetworkNodeCard({ data }: NodeProps<NetworkNodeCardNode>) {
               {iface.bridges.length === 0 ? (
                 <p className="body-sm pc-netcard__value--dim">(unused)</p>
               ) : (
-                iface.bridges.map((bridge, i) => (
-                  <p
-                    key={i}
-                    className={`body-sm pc-netcard__bridge ${bridge.vlan.kind === "unset" ? "pc-netcard__bridge--warn" : ""}`}
-                  >
-                    {bridgeSummaryLabel(bridge)}
-                  </p>
-                ))
+                iface.bridges.map((bridge, i) => {
+                  const purposes = bridgePurposesLabel(bridge.purposes);
+                  return (
+                    <div key={i} className="pc-netcard__bridge">
+                      <div className="pc-netcard__bridgetop">
+                        <span className="code pc-netcard__bridgename">{bridge.name}</span>
+                        <span
+                          className={`meta pc-netcard__vlan ${bridge.vlan.kind === "unset" ? "pc-netcard__vlan--warn" : ""}`}
+                        >
+                          {vlanLabel(bridge.vlan)}
+                        </span>
+                      </div>
+                      <div className="pc-netcard__bridgeaddr">
+                        <span className="meta pc-netcard__addrkind">{addressKindLabel(bridge.address.kind)}</span>
+                        <span
+                          className={`code pc-netcard__addr ${bridge.address.cidr ? "" : "pc-netcard__addr--unset"}`}
+                        >
+                          {bridge.address.cidr || "not set"}
+                        </span>
+                      </div>
+                      {purposes && <p className="meta pc-netcard__purposes">{purposes}</p>}
+                    </div>
+                  );
+                })
               )}
             </div>
 

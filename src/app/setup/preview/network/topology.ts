@@ -8,6 +8,7 @@ import {
   bridgeCountFor,
   bridgeKey,
   interfacesFor,
+  needsHostIpForPurposes,
   type InterfacePurpose,
   type NicSpeed,
   type NodeInfo,
@@ -28,10 +29,27 @@ export type BridgeVlan =
   | { kind: "tagged"; tag: number }
   | { kind: "unset" };
 
+// the one addressing fact worth drawing per bridge — and which of the two
+// very different things it is. "host" is an address the node itself
+// answers on; "network" is only the subnet the bridge switches for its
+// vms/cts, where no host address exists at all. drawing a subnet as if it
+// were the node's ip would be actively misleading, so the kind travels
+// with the value rather than being re-derived at render time.
+export type BridgeAddressKind = "host" | "network";
+
+export interface BridgeAddress {
+  kind: BridgeAddressKind;
+  // "" until the visitor fills it in — still worth drawing as a labelled,
+  // obviously-empty slot, since a missing address is a real gap in the
+  // plan rather than something to hide.
+  cidr: string;
+}
+
 export interface BridgeSummary {
   name: string;
   vlan: BridgeVlan;
   purposes: InterfacePurpose[];
+  address: BridgeAddress;
 }
 
 export interface InterfaceTopology {
@@ -58,6 +76,13 @@ export interface CableInfo {
 export interface NodeTopology {
   nodeIndex: number;
   node: NodeInfo;
+  // hostLabel + the cluster's domain suffix, already joined — falls back
+  // to the bare label (or the node's name) when no suffix is set.
+  fqdn: string;
+  // the address you actually reach this box at: proxmox's web ui and ssh,
+  // on the management bridge. kept at the node level because it's the one
+  // number a visitor scans the diagram for.
+  managementAddress: string;
   interfaces: InterfaceTopology[];
   // one entry per physical nic, in nic order — what the preview actually
   // draws a separate cable for, bonded or not.
@@ -89,27 +114,21 @@ const PURPOSE_SHORT: Record<InterfacePurpose, string> = {
   other: "other",
 };
 
-function purposesLabel(purposes: InterfacePurpose[]): string {
+export function bridgePurposesLabel(purposes: InterfacePurpose[]): string {
   if (purposes.length === 1 && purposes[0] === "vm") return "";
   return purposes.map((p) => PURPOSE_SHORT[p]).join("+");
 }
 
-function vlanLabel(vlan: BridgeVlan): string {
+export function vlanLabel(vlan: BridgeVlan): string {
   if (vlan.kind === "tagged") return `vlan ${vlan.tag}`;
   if (vlan.kind === "unset") return "vlan not set";
   return vlan.homelabVlan ? `vlan ${vlan.homelabVlan} (native)` : "native";
 }
 
-export function bridgeSummaryLabel(bridge: BridgeSummary): string {
-  const purposes = purposesLabel(bridge.purposes);
-  return `${bridge.name} · ${vlanLabel(bridge.vlan)}${purposes ? ` · ${purposes}` : ""}`;
-}
-
-// the label shown once per interface (bonded or not) — every bridge it
-// carries, or "(unused)" when the visitor hasn't enabled one yet.
-export function interfaceCableLabel(iface: InterfaceTopology): string {
-  if (iface.bridges.length === 0) return "(unused)";
-  return iface.bridges.map(bridgeSummaryLabel).join(", ");
+// names what the address next to it actually is, so a served subnet can't
+// be misread as an address the node answers on.
+export function addressKindLabel(kind: BridgeAddressKind): string {
+  return kind === "host" ? "node ip" : "serves";
 }
 
 // every distinct real vlan number in play on this interface — a tagged
@@ -139,7 +158,17 @@ function parseVlanTag(raw: string): BridgeVlan {
   return n === null ? { kind: "unset" } : { kind: "tagged", tag: n };
 }
 
-export function buildClusterTopology(nodes: NodeInfo[], homelabVlan: number | null = null): NodeTopology[] {
+// the cluster-wide settings a single node's drawing still depends on —
+// both live outside NodeInfo, on the wizard's top-level state.
+export interface ClusterContext {
+  // the vlan the untagged/native segment rides, or null for "unnumbered"
+  homelabVlan: number | null;
+  // the domain every node's hostLabel gets suffixed with, or ""
+  hostnameSuffix: string;
+}
+
+export function buildClusterTopology(nodes: NodeInfo[], ctx: ClusterContext): NodeTopology[] {
+  const { homelabVlan, hostnameSuffix } = ctx;
   return nodes.map((node, nodeIndex) => {
     const refs = interfacesFor(node.nics, node.network.bonds);
     // reset per node, not across the cluster — see BOND_COLORS above for
@@ -161,6 +190,8 @@ export function buildClusterTopology(nodes: NodeInfo[], homelabVlan: number | nu
       // to the cluster-wide native vlan.
       const bondVlanOverride = bondConfig ? parseVlanNumber(bondConfig.vlanTag) : null;
 
+      const isManagement = node.network.managementInterfaceId === ref.id;
+
       const count = bridgeCountFor(node.network.bridgeCounts, ref.id);
       const bridges: BridgeSummary[] = [];
       for (let idx = 0; idx < count; idx++) {
@@ -172,7 +203,19 @@ export function buildClusterTopology(nodes: NodeInfo[], homelabVlan: number | nu
               ? { kind: "tagged", tag: bondVlanOverride }
               : { kind: "native", homelabVlan }
             : parseVlanTag(bridge.vlanTag);
-        bridges.push({ name: bridge.name, vlan, purposes: bridge.purposes });
+        // the management bridge is the one exception to "a bridge's
+        // address is its own ip field": the form asks for it once, up with
+        // the hostname, and stores it on NodeNetwork.cidr — so its own ip
+        // field is never filled in. it's always a host address by
+        // definition (it's how you reach the web ui), never a bare subnet.
+        const address: BridgeAddress =
+          isManagement && idx === 0
+            ? { kind: "host", cidr: node.network.cidr }
+            : {
+                kind: needsHostIpForPurposes(bridge.purposes, bridge.otherNeedsHostIp) ? "host" : "network",
+                cidr: bridge.ip,
+              };
+        bridges.push({ name: bridge.name, vlan, purposes: bridge.purposes, address });
       }
 
       return {
@@ -181,7 +224,7 @@ export function buildClusterTopology(nodes: NodeInfo[], homelabVlan: number | nu
         bond: bondConfig ? { name: bondConfig.name, modeLabel: bondModeLabel(bondConfig.mode) } : null,
         colorVar,
         bridges,
-        isManagement: node.network.managementInterfaceId === ref.id,
+        isManagement,
       };
     });
 
@@ -212,6 +255,14 @@ export function buildClusterTopology(nodes: NodeInfo[], homelabVlan: number | nu
       },
     }));
 
-    return { nodeIndex, node, interfaces, cables };
+    const label = node.network.hostLabel || node.name;
+    return {
+      nodeIndex,
+      node,
+      fqdn: hostnameSuffix ? `${label}.${hostnameSuffix}` : label,
+      managementAddress: node.network.cidr,
+      interfaces,
+      cables,
+    };
   });
 }
