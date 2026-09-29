@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import {
   Background,
@@ -12,7 +13,9 @@ import {
   useReactFlow,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { loadPersistedState, type PersistedState } from "../../wizard-state";
+import { loadPersistedState, persistCurrentStep, type PersistedState } from "../../wizard-state";
+import { problemsUpTo } from "../../step-checks";
+import { ProblemList } from "../../problem-list";
 import { effectiveClusterStorage } from "../../derive";
 import { buildStorageOverview, type StorageOverview } from "./plan";
 import { StorageNodeCard } from "./node-card";
@@ -86,6 +89,7 @@ function StorageCanvas({ overview, hydrated, hasSaved }: { overview: StorageOver
 }
 
 export default function StoragePreview() {
+  const router = useRouter();
   const [saved, setSaved] = useState<PersistedState | null>(null);
   const [hydrated, setHydrated] = useState(false);
 
@@ -108,6 +112,14 @@ export default function StoragePreview() {
         : { nodes: [], ceph: null, zfs: null, localKindLabel: "zfs", localName: "" },
     [saved],
   );
+
+  // same gate as the wizard's own "preview": nothing past a step with problems
+  const blocking = useMemo(() => (saved ? problemsUpTo("storage", saved) : []), [saved]);
+  const goToBackups = () => {
+    if (blocking.length > 0) return;
+    persistCurrentStep("backups");
+    router.push("/setup");
+  };
 
   const totalOsds = overview.nodes.reduce((n, v) => n + v.cephDisks.length, 0);
   const totalZfsDisks = overview.nodes.reduce((n, v) => n + v.zfsDisks.length, 0);
@@ -222,11 +234,18 @@ export default function StoragePreview() {
             </div>
           )}
 
+          {hydrated && saved && <ProblemList problems={blocking} step="storage" />}
           <div className="pc-stepflow__nav">
             <Link href="/setup" className="pc-btn pc-btn--ghost">
               ← back to storage
             </Link>
-            <button type="button" className="pc-btn" disabled title="steps 4–5 aren't built yet">
+            <button
+              type="button"
+              className="pc-btn pc-btn--primary"
+              onClick={goToBackups}
+              disabled={blocking.length > 0}
+              title={blocking.length > 0 ? "fix the problems listed above first" : undefined}
+            >
               <span className="pc-btn__bracket">[</span>
               next
               <span className="pc-btn__bracket">]</span>

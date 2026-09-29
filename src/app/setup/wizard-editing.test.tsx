@@ -225,6 +225,33 @@ describe("step 2 — cluster-wide network", () => {
     await waitForSave((s) => s.globalCidr === "192.168.50.0/24" && s.gateway === "192.168.50.1");
   });
 
+  it("starts the dns server as the gateway", async () => {
+    await renderAtNetworkStep();
+    expect(screen.getByLabelText(/^dns server/i)).toHaveValue((screen.getByLabelText(/^gateway/i) as HTMLInputElement).value);
+  });
+
+  // most homelab routers answer dns too, so it moves with the gateway
+  it("moves the dns server along with the gateway", async () => {
+    const user = await renderAtNetworkStep();
+    await retype(user, screen.getByLabelText(/^gateway/i), "10.0.10.254");
+    expect(screen.getByLabelText(/^dns server/i)).toHaveValue("10.0.10.254");
+    await retype(user, screen.getByLabelText(/^homelab cidr/i), "192.168.50.0/24");
+    await waitForSave((s) => s.gateway === "192.168.50.1" && s.dns === "192.168.50.1");
+  });
+
+  it("keeps a dns server of the visitor's own when the gateway moves", async () => {
+    const user = await renderAtNetworkStep();
+    await retype(user, screen.getByLabelText(/^dns server/i), "10.0.10.53");
+    await retype(user, screen.getByLabelText(/^gateway/i), "10.0.10.254");
+    await waitForSave((s) => s.gateway === "10.0.10.254" && s.dns === "10.0.10.53");
+  });
+
+  it("wants an ip for the dns server", async () => {
+    const user = await renderAtNetworkStep();
+    await retype(user, screen.getByLabelText(/^dns server/i), "dns.lan");
+    expect(screen.getByLabelText(/^dns server/i).closest(".pc-field")).toHaveClass("pc-field--error");
+  });
+
   it("rejects an invalid domain suffix", async () => {
     const user = await renderAtNetworkStep();
     await retype(user, screen.getByLabelText(/^hostname suffix/i), "-bad.lan");
@@ -245,12 +272,46 @@ describe("step 2 — cluster-wide network", () => {
 
   // a bare ip gets the homelab's prefix on blur — /32 would cut the node
   // off from its own gateway
-  it("fills in the subnet prefix when a bare ip is typed", async () => {
+  // a static ip carries its network's prefix — /32 would cut it off
+  it("gives a bare static ip the network's prefix", async () => {
     const user = await renderAtNetworkStep();
     const ip = screen.getByLabelText(/^static ip/i);
+    expect((ip as HTMLInputElement).value).toMatch(/\/24$/);
     await retype(user, ip, "10.0.10.50");
     await user.tab();
     expect(ip).toHaveValue("10.0.10.50/24");
+  });
+
+  it("spells out what a static ip's prefix means", async () => {
+    const user = await renderAtNetworkStep();
+    const ip = screen.getByLabelText(/^static ip/i);
+    await retype(user, ip, "10.0.10.50/24");
+    expect(screen.getByText("10.0.10.50 is this node's address in the 10.0.10.0/24 network")).toBeInTheDocument();
+  });
+
+  // left over from when static ips were proposed as /32
+  it("warns that a /32 static ip cuts the node off", async () => {
+    const user = await renderAtNetworkStep();
+    await retype(user, screen.getByLabelText(/^static ip/i), "10.0.10.50/32");
+    expect(screen.getByText(/\/32 puts this node alone on its network/)).toHaveClass("pc-field__meaning--warn");
+  });
+
+  // a vm bridge's field is a network, so it keeps the subnet's prefix
+  it("gives a bare ip on a vm bridge's network the subnet's prefix", async () => {
+    const user = await renderAtNetworkStep();
+    const network = screen.getAllByLabelText(/^network/i).find((el) => el.tagName === "INPUT")!;
+    expect(network.getAttribute("placeholder")).toMatch(/\/24$/);
+    await retype(user, network, "10.0.40.0");
+    await user.tab();
+    expect(network).toHaveValue("10.0.40.0/24");
+  });
+
+  it("proposes a bridge's static ip with the network's prefix", async () => {
+    const user = await renderAtNetworkStep();
+    const purposes = group(/^used for \(pick as many as apply\)$/i);
+    await user.click(within(purposes).getByRole("checkbox", { name: /^backups/i }));
+    const ip = await screen.findByLabelText(/^static ip for this node/i);
+    expect(ip.getAttribute("placeholder")).toMatch(/\/24$/);
   });
 
   it("shows a subnet breakdown on request", async () => {
@@ -331,7 +392,7 @@ describe("step 2 — bridges", () => {
 
   it("turns a bridge off", async () => {
     const user = await renderAtNetworkStep();
-    await user.click(screen.getByRole("checkbox", { name: /^bridge this interface/i }));
+    await user.click(screen.getByRole("checkbox", { name: /^use this interface/i }));
     await waitForSave((s) => s.nodes[0].network.bridges["nic-1#0"]?.enabled === false);
   });
 
@@ -401,6 +462,67 @@ describe("step 2 — bridges", () => {
   });
 });
 
+describe("step 2 — storage links", () => {
+  // three nodes with a spare disk each, so ceph is on and offered as a
+  // nic purpose. every node has its own form (identical network is off);
+  // node 1's nic 2 is the first non-management interface on the page
+  const atStorageNetwork = () => renderAtNetworkStep({ nodeCount: "3", onHardware: addSpareDisk });
+  const storageLinkRadio = () => screen.getAllByRole("radio", { name: /^a storage link/i })[0];
+  const nic2Purposes = () => group(/^used for \(pick as many as apply\)$/i);
+
+  it("offers only bridge purposes on a vm bridge", async () => {
+    await atStorageNetwork();
+    expect(screen.getAllByRole("radio", { name: /^vm bridges/i })[0]).toBeChecked();
+    expect(within(nic2Purposes()).queryByRole("checkbox", { name: /^ceph/i })).not.toBeInTheDocument();
+    expect(within(nic2Purposes()).getByRole("checkbox", { name: /^backups/i })).toBeInTheDocument();
+  }, 15_000);
+
+  it("puts ceph straight on the nic, with no bridge name", async () => {
+    const user = await atStorageNetwork();
+    const bridgeNames = screen.getAllByLabelText(/^bridge name/i).length;
+    await user.click(storageLinkRadio());
+    await waitForSave((s) => s.nodes[0].network.bridges["nic-1#0"]?.purposes.join() === "ceph");
+    expect(screen.getAllByLabelText(/^bridge name/i)).toHaveLength(bridgeNames - 1);
+    expect(screen.getAllByText(/carries the address itself/i).length).toBeGreaterThan(0);
+    // only storage purposes left to pick
+    expect(within(nic2Purposes()).getByRole("checkbox", { name: /^ceph/i })).toBeChecked();
+    expect(within(nic2Purposes()).queryByRole("checkbox", { name: /^backups/i })).not.toBeInTheDocument();
+  }, 15_000);
+
+  it("drops the interface's extra bridges when it becomes a storage link", async () => {
+    const user = await atStorageNetwork();
+    // [0] is the management interface's count, [1] nic 2's
+    await retype(user, screen.getAllByLabelText(/^bridges on this interface/i)[1], "2");
+    await waitForSave((s) => !!s.nodes[0].network.bridges["nic-1#1"]);
+    expect(await screen.findAllByLabelText(/^vlan tag/i)).not.toHaveLength(0);
+    await user.click(storageLinkRadio());
+    await waitForSave((s) => s.nodes[0].network.bridgeCounts["nic-1"] === "1" && !s.nodes[0].network.bridges["nic-1#1"]);
+    expect(screen.queryByLabelText(/^vlan tag/i)).not.toBeInTheDocument();
+    expect(screen.getAllByText(/a storage link has no bridge to split/i).length).toBeGreaterThan(0);
+  }, 15_000);
+
+  it("never offers ceph on an extra bridge", async () => {
+    const user = await atStorageNetwork();
+    await retype(user, screen.getAllByLabelText(/^bridges on this interface/i)[0], "2");
+    const extra = group(/^used for \(pick as many as apply\)$/i, 1);
+    expect(within(extra).queryByRole("checkbox", { name: /^ceph/i })).not.toBeInTheDocument();
+  }, 15_000);
+
+  it("goes back to a vm bridge", async () => {
+    const user = await atStorageNetwork();
+    await user.click(storageLinkRadio());
+    await waitForSave((s) => s.nodes[0].network.bridges["nic-1#0"]?.purposes.join() === "ceph");
+    await user.click(screen.getAllByRole("radio", { name: /^vm bridges/i })[0]);
+    await waitForSave((s) => s.nodes[0].network.bridges["nic-1#0"]?.purposes.join() === "vm");
+  }, 15_000);
+
+  it("asks for each node's address on the nic itself", async () => {
+    const user = await atStorageNetwork();
+    await user.click(storageLinkRadio());
+    expect(await screen.findByText(/set directly on nic-2$/i)).toBeInTheDocument();
+  }, 15_000);
+});
+
 describe("step 2 — identical network", () => {
   it("shares one structure block and keeps addresses per node", async () => {
     const user = await renderAtNetworkStep({ nodeCount: "2" });
@@ -408,13 +530,13 @@ describe("step 2 — identical network", () => {
     await waitForSave((s) => s.identicalNetwork);
     // one set of purpose pickers for the cluster, but a static ip per node
     expect(screen.getAllByLabelText(/^static ip/i)).toHaveLength(2);
-    expect(screen.getAllByRole("checkbox", { name: /^bridge this interface/i })).toHaveLength(1);
+    expect(screen.getAllByRole("checkbox", { name: /^use this interface/i })).toHaveLength(1);
   });
 
   it("copies a structural edit to every node", async () => {
     const user = await renderAtNetworkStep({ nodeCount: "2" });
     await user.click(screen.getByRole("checkbox", { name: /identical network setup/i }));
-    await user.click(screen.getByRole("checkbox", { name: /^bridge this interface/i }));
+    await user.click(screen.getByRole("checkbox", { name: /^use this interface/i }));
     await waitForSave((s) => s.nodes.every((n) => n.network.bridges["nic-1#0"]?.enabled === false));
   });
 

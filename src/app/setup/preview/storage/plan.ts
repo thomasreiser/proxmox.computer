@@ -24,7 +24,7 @@ import {
   enabledStorageModes,
   isSlowNic,
   nicIndicesForInterface,
-  nicSpeedLabel,
+  linkSpeedLabel,
   type AdditionalDisk,
   type ClusterStorage,
   type DiskRole,
@@ -133,11 +133,7 @@ export function storageLinkFor(node: NodeInfo, mode: StorageMode): StorageLinkVi
       .map((i) => node.nics[i]?.speed)
       .filter((speed) => speed !== undefined);
     if (speeds.some(isSlowNic)) slow = true;
-    const distinct = [...new Set(speeds)];
-    const speedText =
-      speeds.length > 1 && distinct.length === 1
-        ? `${speeds.length} × ${nicSpeedLabel(distinct[0])}`
-        : speeds.map(nicSpeedLabel).join(" + ");
+    const speedText = linkSpeedLabel(speeds);
     const bond = id.startsWith("bond-") ? node.network.bonds[Number(id.slice("bond-".length))] : undefined;
     return bond ? `${speedText} (${bond.name})` : speedText;
   });

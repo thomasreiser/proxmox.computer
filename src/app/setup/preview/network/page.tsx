@@ -20,7 +20,7 @@ import "@xyflow/react/dist/style.css";
 import { problemsUpTo } from "../../step-checks";
 import { ProblemList } from "../../problem-list";
 import { loadPersistedState, persistCurrentStep, type PersistedState } from "../../wizard-state";
-import { buildClusterTopology, cephCableCount, distinctVlanTags, type NodeTopology } from "./topology";
+import { buildClusterTopology, cephCableCount, distinctVlanTags, lagGroups, type NodeTopology } from "./topology";
 import { NetworkNodeCard, type NetworkNodeCardNode } from "./node-card";
 import { SwitchNode, type SwitchNodeType } from "./switch-node";
 
@@ -291,6 +291,7 @@ export default function NetworkPreview() {
   );
   const totalCables = topologies.reduce((n, t) => n + t.cables.length, 0);
   const cephCables = cephCableCount(topologies);
+  const lags = lagGroups(topologies);
 
   return (
     <div className="pc-root flex min-h-full flex-col">
@@ -322,7 +323,9 @@ export default function NetworkPreview() {
               address each one sits on — <span className="code">node ip</span>{" "}
               is an address the host itself answers on,{" "}
               <span className="code">serves</span> is only the subnet that
-              bridge switches for its vms. Ports carrying ceph are marked at
+              bridge switches for its vms. Ceph and zfs links are marked{" "}
+              <span className="code">no bridge</span>: their node ip sits on
+              the nic or bond itself. Ports carrying ceph are marked at
               both ends — those all have to land on one switch. Each switch
               port shows the connector it needs and how to set its vlans:{" "}
               <span className="code">u</span> is untagged (native),{" "}
@@ -372,6 +375,10 @@ export default function NetworkPreview() {
                 <span className="code pc-summary__val pc-summary__val--sm">{saved.gateway || "—"}</span>
               </div>
               <div className="pc-summary__cell">
+                <span className="label pc-summary__key">dns server</span>
+                <span className="code pc-summary__val pc-summary__val--sm">{saved.dns || "—"}</span>
+              </div>
+              <div className="pc-summary__cell">
                 <span className="label pc-summary__key">native vlan</span>
                 <span className="code pc-summary__val pc-summary__val--sm">{homelabVlan ?? "untagged"}</span>
               </div>
@@ -391,6 +398,36 @@ export default function NetworkPreview() {
               constraint ceph imposes — worth saying out loud, because a
               visitor with two switches will otherwise split these ports
               across both without realizing what it costs. */}
+          {/* the one bond setting the switch has to match — without it an
+              lacp bond never comes up, and the ports look fine on their own */}
+          {hydrated && lags.length > 0 && (
+            <div className="pc-callout pc-callout--warning">
+              <span className="code pc-callout__glyph">⚠</span>
+              <div className="pc-callout__body">
+                <p className="body pc-callout__title">
+                  {lags.length === 1 ? "1 bond needs" : `${lags.length} bonds need`} a lag on the switch
+                </p>
+                <p className="body pc-callout__text text-ink-muted">
+                  Group each bond&apos;s ports into one link aggregation group
+                  on the switch — lacp as 802.3ad with lacp active, balance-rr
+                  as a static port-channel. Until the switch agrees, an lacp
+                  bond stays down, even with every cable plugged in. Each
+                  member port is tagged on the switch above.
+                </p>
+                <ul className="pc-laglist">
+                  {lags.map((lag) => (
+                    <li key={`${lag.fqdn}-${lag.bondName}`} className="body-sm pc-laglist__item">
+                      <span className="code">{lag.fqdn}</span>
+                      <span className="code">{lag.bondName}</span>
+                      <span className="text-ink-muted">{lag.ports.join(" + ")}</span>
+                      <span className="meta">{lag.lag === "lacp" ? "lacp (802.3ad)" : "static lag"}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+          )}
+
           {hydrated && cephCables > 0 && (
             <div className="pc-callout pc-callout--warning">
               <span className="code pc-callout__glyph">⚠</span>

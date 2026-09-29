@@ -61,7 +61,10 @@ export function NetworkNodeCard({ data }: NodeProps<NetworkNodeCardNode>) {
                   return (
                     <div key={i} className="pc-netcard__bridge">
                       <div className="pc-netcard__bridgetop">
-                        <span className="code pc-netcard__bridgename">{bridge.name}</span>
+                        <span className="code pc-netcard__bridgename">
+                          {bridge.name}
+                          {bridge.storageLink && <span className="meta pc-netcard__nobridge"> no bridge</span>}
+                        </span>
                         <span
                           className={`meta pc-netcard__vlan ${bridge.vlan.kind === "unset" ? "pc-netcard__vlan--warn" : ""}`}
                         >

@@ -3,10 +3,12 @@
 // which keeps the assertions about the rule under test, not about the
 // twenty unrelated fields a NodeInfo happens to carry.
 
+import { defaultBackupPlan } from "./backups";
 import { defaultStoragePlan } from "./derive";
 import { STORAGE_VERSION } from "./wizard-state";
 import type {
   AdditionalDisk,
+  BackupPlan,
   BondConfig,
   BridgeConfig,
   InterfacePurpose,
@@ -111,6 +113,11 @@ export function cluster(count: number, overrides: Partial<NodeInfo> = {}): NodeI
   });
 }
 
+/** a complete backup plan: the defaults, plus the pbs address they leave blank */
+export function backupPlan(overrides: Partial<BackupPlan> = {}): BackupPlan {
+  return { ...defaultBackupPlan(), pbsAddress: "10.0.10.50", ...overrides };
+}
+
 /**
  * A complete, valid saved state — what the wizard itself would write. For
  * tests that start from a save (the preview routes, restore paths) rather
@@ -124,12 +131,14 @@ export function persistedState(overrides: Partial<PersistedState> = {}): Persist
     hostnameSuffix: "lab.lan",
     globalCidr: "10.0.10.0/24",
     gateway: "10.0.10.1",
+    dns: "10.0.10.1",
     homelabVlan: "",
     nodes: cluster(3),
     identicalHardware: false,
     identicalNetwork: false,
     clusterStorage: { ceph: true, zfs: false },
     storage: defaultStoragePlan(),
+    backups: backupPlan(),
     identicalStorage: false,
     ...overrides,
   };

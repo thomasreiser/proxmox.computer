@@ -2,7 +2,7 @@
 
 import { Handle, Position, type Node, type NodeProps } from "@xyflow/react";
 import { NIC_PORT_LABEL } from "../../wizard-state";
-import { cephCableCount, portVlanDescription, portVlanLabel, type NodeTopology } from "./topology";
+import { cephCableCount, portLagLabel, portVlanDescription, portVlanLabel, type NodeTopology } from "./topology";
 
 export type SwitchNodeData = { name: string; topologies: NodeTopology[] };
 export type SwitchNodeType = Node<SwitchNodeData, "switch">;
@@ -46,6 +46,8 @@ export function SwitchNode({ data }: NodeProps<SwitchNodeType>) {
                     `${topology.node.name} — ${cable.nicName}`,
                     cable.nicPort ? NIC_PORT_LABEL[cable.nicPort] : "connector unknown",
                     portVlanDescription(cable.iface),
+                    ...(cable.iface.bond?.lag === "lacp" ? [`lacp lag with the other ${cable.iface.bond.name} ports`] : []),
+                    ...(cable.iface.bond?.lag === "static" ? [`static lag with the other ${cable.iface.bond.name} ports`] : []),
                     ...(cable.iface.carriesCeph ? ["ceph"] : []),
                   ].join(" — ")}
                 >
@@ -60,6 +62,10 @@ export function SwitchNode({ data }: NodeProps<SwitchNodeType>) {
                   >
                     {portVlanLabel(cable.iface)}
                   </span>
+                  {/* a bond that needs the switch's help: these ports form one lag */}
+                  {portLagLabel(cable.iface) && (
+                    <span className="meta pc-switch__portlag">{portLagLabel(cable.iface)}</span>
+                  )}
                   <Handle
                     type="target"
                     position={Position.Top}

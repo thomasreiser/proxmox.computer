@@ -12,7 +12,7 @@ export function ProblemList({ problems, step }: { problems: StepProblem[]; step:
   if (problems.length === 0) return null;
   const earlier = problems.filter((p) => p.step !== step);
   return (
-    <div className="pc-callout pc-callout--danger" role="alert">
+    <div className="pc-callout pc-callout--danger pc-problemlist" role="alert">
       <span className="code pc-callout__glyph">✗</span>
       <div className="pc-callout__body">
         <p className="body pc-callout__title">

@@ -17,6 +17,15 @@ import {
 } from "./derive";
 import { hasLocalDisks, validatePoolName, withEffectiveDiskRoles } from "./storage";
 import {
+  RETENTION_FIELDS,
+  maxBackupsKept,
+  usesPbs,
+  validateExportPath,
+  validateHostAddress,
+  validateRetention,
+  validateScheduleTime,
+} from "./backups";
+import {
   required,
   validateCidr,
   validateFriendlyName,
@@ -36,7 +45,9 @@ import {
   bridgeCountFor,
   bridgeKey,
   enabledStorageModes,
+  interfaceNameFor,
   interfacesFor,
+  isStorageLink,
   needsHostIpForPurposes,
   type NodeInfo,
   type PersistedState,
@@ -55,10 +66,10 @@ export interface StepProblem {
 /** the parts of the wizard's state the checks read — a PersistedState, or the live form */
 export type CheckedState = Pick<
   PersistedState,
-  "nodeCount" | "nodes" | "hostnameSuffix" | "globalCidr" | "gateway" | "homelabVlan" | "clusterStorage" | "storage"
+  "nodeCount" | "nodes" | "hostnameSuffix" | "globalCidr" | "gateway" | "dns" | "homelabVlan" | "clusterStorage" | "storage" | "backups"
 >;
 
-const STEP_ORDER: WizardStepId[] = ["hardware", "network", "storage"];
+const STEP_ORDER: WizardStepId[] = ["hardware", "network", "storage", "backups"];
 
 function nodeLabel(node: NodeInfo, index: number): string {
   return `node ${String(index + 1).padStart(2, "0")} — ${node.name || "unnamed"}`;
@@ -108,6 +119,7 @@ export function networkProblems(state: CheckedState): StepProblem[] {
   check("cluster", "homelab cidr", required(state.globalCidr, validateCidr));
   check("cluster", "main homelab vlan", validateOptionalVlanTag(state.homelabVlan));
   check("cluster", "gateway", required(state.gateway, validateIp));
+  check("cluster", "dns server", required(state.dns, validateIp));
 
   const conflicts = buildAddressConflicts(state.nodes);
   const maxBonds = maxBondsForCluster(state.nodes);
@@ -134,17 +146,24 @@ export function networkProblems(state: CheckedState): StepProblem[] {
         const key = bridgeKey(iface.id, idx);
         const bridge = net.bridges[key];
         if (!bridge || !bridge.enabled) continue;
-        const label = bridge.name || key;
-        check(where, `bridge ${label} name`, validateInterfaceName(bridge.name) ?? validateUniqueName(bridge.name, names.interfaces));
+        // a storage link has no bridge — no name to check, and its problems
+        // are named after the nic or bond that carries the address
+        const storageLink = isStorageLink(net, key);
+        const label = storageLink
+          ? `storage link ${interfaceNameFor(iface.id, node.nics, net.bonds)}`
+          : `bridge ${bridge.name || key}`;
+        if (!storageLink) {
+          check(where, `${label} name`, validateInterfaceName(bridge.name) ?? validateUniqueName(bridge.name, names.interfaces));
+        }
         // an extra bridge shares its nic with a sibling, which linux only
         // allows when each is tagged with its own vlan
         if (idx > 0) {
-          check(where, `bridge ${label} vlan tag`, validateVlanTag(bridge.vlanTag, siblingVlanTagsFor(net.bridges, count, iface.id, idx)));
+          check(where, `${label} vlan tag`, validateVlanTag(bridge.vlanTag, siblingVlanTagsFor(net.bridges, count, iface.id, idx)));
         }
         if (addressable.has(key)) {
           const needsHost = needsHostIpForPurposes(bridge.purposes, bridge.otherNeedsHostIp);
           const address = needsHost ? validateHostCidr(bridge.ip) : validateNetwork(bridge.ip);
-          check(where, `bridge ${label} ${needsHost ? "static ip" : "network"}`, address ?? conflicts.get(`${i}#${key}`) ?? null);
+          check(where, `${label} ${needsHost ? "static ip" : "network"}`, address ?? conflicts.get(`${i}#${key}`) ?? null);
         }
       }
     }
@@ -166,10 +185,32 @@ export function storageProblems(state: CheckedState): StepProblem[] {
   return problems;
 }
 
+export function backupProblems(state: CheckedState): StepProblem[] {
+  const { problems, check } = collector("backups");
+  const plan = state.backups;
+  if (plan.target === "none") return problems;
+  // each target only needs its own fields — the others are kept, unread
+  if (plan.target === "pbs-external") check("cluster", "pbs address", validateHostAddress(plan.pbsAddress));
+  if (usesPbs(plan.target)) check("cluster", "datastore", validatePoolName(plan.datastore));
+  if (plan.target === "nfs") {
+    check("cluster", "nfs server", validateHostAddress(plan.nfsServer));
+    check("cluster", "export path", validateExportPath(plan.nfsExport));
+  }
+  check("cluster", "backup time", validateScheduleTime(plan.schedule));
+  for (const field of RETENTION_FIELDS) check("cluster", field.label, validateRetention(plan[field.key]));
+  // retention that keeps nothing deletes each backup as it's made
+  if (RETENTION_FIELDS.every((f) => !validateRetention(plan[f.key])) && maxBackupsKept(plan) === 0) {
+    check("cluster", "retention", "keeps nothing — keep at least one backup");
+  }
+  if (usesPbs(plan.target) && plan.offsite) check("cluster", "off-site pbs address", validateHostAddress(plan.offsiteAddress));
+  return problems;
+}
+
 const CHECKS: Record<WizardStepId, (state: CheckedState) => StepProblem[]> = {
   hardware: hardwareProblems,
   network: networkProblems,
   storage: storageProblems,
+  backups: backupProblems,
 };
 
 /**

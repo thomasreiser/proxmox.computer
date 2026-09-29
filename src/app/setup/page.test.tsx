@@ -9,7 +9,7 @@ import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import Setup from "./page";
 import { STORAGE_KEY, type PersistedState } from "./wizard-state";
-import { cluster, persistedState } from "./test-fixtures";
+import { backupPlan, cluster, persistedState } from "./test-fixtures";
 import { router } from "@/test/router";
 import {
   saved,
@@ -17,6 +17,7 @@ import {
   setNodeCount,
   renderAtNetworkStep,
   renderAtStorageStep,
+  renderAtBackupsStep,
   addSpareDisk,
   addTwoSpareDisks,
   chooseClusterStorage,
@@ -60,6 +61,29 @@ describe("step 1 — hardware", () => {
     await setNodeCount(user, "3");
     expect(await screen.findByText(/identical hardware across all nodes/i)).toBeInTheDocument();
   });
+
+  // regression: a node added after "identical hardware" was ticked came
+  // with default hardware — blank memory and boot disk, the default cpu —
+  // so it blocked step 1 and split the cpu types, with no form to fix it
+  it("gives a node added later the shared hardware", async () => {
+    const user = userEvent.setup();
+    await setNodeCount(user, "2");
+    await user.click(await screen.findByRole("checkbox", { name: /^identical hardware across all nodes/i }));
+    await fillRequiredHardware(user);
+    const family = screen.getByLabelText(/^cpu family/i) as HTMLSelectElement;
+    const other = [...family.options].find((o) => o.value !== family.value)!.value;
+    await user.selectOptions(family, other);
+    await setNodeCount(user, "3");
+    await waitForSave(
+      (s) =>
+        s.nodes.length === 3 &&
+        s.nodes[2].ramGb === "64" &&
+        s.nodes[2].bootDiskSizeGb === "512" &&
+        s.nodes[2].cpuFamily === other,
+    );
+    await user.click(screen.getByRole("button", { name: /preview/i }));
+    expect(router.push).toHaveBeenCalledWith("/setup/preview/hardware");
+  }, 15_000);
 });
 
 describe("continuing past a step", () => {
@@ -682,3 +706,160 @@ describe("step 3 — storage", () => {
     expect(screen.getByText("every node's disks")).toBeInTheDocument();
   });
 });
+
+describe("step 4 — backups", () => {
+  // a save that got past steps 1–3, left at step 4 with the backup
+  // defaults — the pbs address still blank, as a visitor would find it
+  async function renderStep4(backups = backupPlan({ pbsAddress: "" })) {
+    window.localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify(
+        persistedState({
+          currentStep: "backups",
+          nodes: cluster(3, { ramGb: "64", bootDiskSizeGb: "512" }),
+          backups,
+        }),
+      ),
+    );
+    const user = userEvent.setup();
+    render(<Setup />);
+    await screen.findByRole("heading", { name: "backups" });
+    return user;
+  }
+  const target = (name: RegExp) => screen.getByRole("radio", { name });
+
+  it("is reached from step 3 through its hand-off", async () => {
+    await renderAtBackupsStep();
+    expect(target(/on its own machine/i)).toBeChecked();
+    expect(screen.getByLabelText(/pbs address/i)).toHaveValue("");
+  }, 30_000);
+
+  it("starts on a separate pbs with the default retention", async () => {
+    await renderStep4();
+    expect(target(/on its own machine/i)).toBeChecked();
+    expect(screen.getByLabelText(/^datastore/i)).toHaveValue("backups");
+    expect(screen.getByLabelText(/backup time/i)).toHaveValue("02:00");
+    expect(screen.getByLabelText(/keep monthly/i)).toHaveValue(6);
+    expect(summaryVal(/oldest reaches back/)).toBe("about 6 months");
+  });
+
+  it("asks only for the chosen target's own fields", async () => {
+    const user = await renderStep4();
+    await user.click(target(/as a vm/i));
+    expect(screen.queryByLabelText(/pbs address/i)).not.toBeInTheDocument();
+    expect(screen.getByLabelText(/^datastore/i)).toBeInTheDocument();
+
+    await user.click(target(/nfs/i));
+    expect(screen.queryByLabelText(/^datastore/i)).not.toBeInTheDocument();
+    expect(screen.getByLabelText(/nfs server/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/export path/i)).toBeInTheDocument();
+    // verify, encryption and sync are pbs features
+    expect(screen.queryByRole("checkbox", { name: /encrypt/i })).not.toBeInTheDocument();
+  });
+
+  it("asks for nothing, and warns, with no backups", async () => {
+    const user = await renderStep4();
+    await user.click(target(/no backups/i));
+    expect(screen.queryByLabelText(/backup time/i)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/keep daily/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/gone for good\. ceph and zfs replication/i)).toBeInTheDocument();
+  });
+
+  it("won't preview without the pbs address, and lists it", async () => {
+    const user = await renderStep4();
+    await user.click(screen.getByRole("button", { name: /preview/i }));
+    expect(router.push).not.toHaveBeenCalled();
+    expect(screen.getByRole("alert")).toHaveTextContent(/pbs address/i);
+    // spaced off the fields above it (see .pc-stepflow__card .pc-problemlist)
+    expect(screen.getByRole("alert")).toHaveClass("pc-problemlist");
+
+    await user.type(screen.getByLabelText(/pbs address/i), "pbs.lab.lan");
+    await user.click(screen.getByRole("button", { name: /preview/i }));
+    expect(router.push).toHaveBeenCalledWith("/setup/preview/backups");
+  });
+
+  // quiet until the visitor has been in the field — no red on arrival
+  it("holds an address error back until the field is left", async () => {
+    const user = await renderStep4();
+    const field = screen.getByLabelText(/pbs address/i);
+    expect(screen.queryByText("required")).not.toBeInTheDocument();
+    await user.type(field, "pbs_01");
+    expect(screen.queryByText(/hostname like/)).not.toBeInTheDocument();
+    await user.tab();
+    expect(screen.getByText(/hostname like/)).toBeInTheDocument();
+  });
+
+  it("recounts the retention as it's edited", async () => {
+    const user = await renderStep4();
+    const monthly = screen.getByLabelText(/keep monthly/i);
+    await user.clear(monthly);
+    await user.type(monthly, "12");
+    expect(summaryVal(/oldest reaches back/)).toBe("about 12 months");
+    expect(summaryVal(/backups kept per vm/)).toBe("up to 26");
+  });
+
+  it("won't take retention that keeps nothing", async () => {
+    const user = await renderStep4(backupPlan());
+    for (const label of [/keep last/i, /keep daily/i, /keep weekly/i, /keep monthly/i]) {
+      await user.clear(screen.getByLabelText(label));
+      await user.type(screen.getByLabelText(label), "0");
+    }
+    expect(screen.getByText(/deleted as soon as it's made/i)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /preview/i }));
+    expect(router.push).not.toHaveBeenCalled();
+    expect(screen.getByRole("alert")).toHaveTextContent(/keeps nothing/i);
+  });
+
+  it("asks where the off-site copy goes once it's ticked", async () => {
+    const user = await renderStep4(backupPlan());
+    expect(screen.queryByLabelText(/off-site pbs address/i)).not.toBeInTheDocument();
+    await user.click(screen.getByRole("checkbox", { name: /off-site pbs/i }));
+    expect(screen.getByLabelText(/off-site pbs address/i)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /preview/i }));
+    expect(screen.getByRole("alert")).toHaveTextContent(/off-site pbs address/i);
+  });
+
+  it("warns about a pbs vm until there's an off-site copy", async () => {
+    const user = await renderStep4(backupPlan());
+    await user.click(target(/as a vm/i));
+    expect(screen.getByText(/takes the backups with it/i)).toBeInTheDocument();
+    await user.click(screen.getByRole("checkbox", { name: /off-site pbs/i }));
+    expect(screen.queryByText(/takes the backups with it/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/fine while the off-site copy/i)).toBeInTheDocument();
+  });
+
+  // the fixture's nodes each have one 1000 gb disk, in ceph with 3 replicas
+  it("says how big a full backup can get once storage is full", async () => {
+    const user = await renderStep4(backupPlan());
+    expect(screen.getByText(/one full backup of every guest is up to 1\.0 tb/i)).toBeInTheDocument();
+    await user.click(target(/nfs/i));
+    expect(screen.getByText(/20 kept backups can reach 20 tb/i)).toBeInTheDocument();
+    await user.click(target(/no backups/i));
+    expect(screen.queryByText(/one full backup of every guest/i)).not.toBeInTheDocument();
+  });
+
+  it("reminds to keep the encryption key safe", async () => {
+    const user = await renderStep4(backupPlan());
+    await user.click(screen.getByRole("checkbox", { name: /encrypt backups/i }));
+    expect(screen.getByText(/without it an encrypted backup can't be restored/i)).toBeInTheDocument();
+  });
+
+  it("saves the plan as it's edited", async () => {
+    const user = await renderStep4();
+    await user.click(target(/nfs/i));
+    await user.type(screen.getByLabelText(/nfs server/i), "nas.lab.lan");
+    await waitForSave((s) => s.backups.target === "nfs" && s.backups.nfsServer === "nas.lab.lan");
+  });
+
+  it("goes back to storage", async () => {
+    const user = await renderStep4();
+    await user.click(screen.getByRole("button", { name: /back/i }));
+    expect(await screen.findByRole("heading", { name: "storage" })).toBeInTheDocument();
+  });
+});
+
+/** a summary cell's value in the wizard, by its key */
+function summaryVal(key: RegExp): string {
+  const keyEl = screen.getAllByText(key).find((el) => el.classList.contains("pc-summary__key"));
+  return keyEl?.parentElement?.querySelector(".pc-summary__val")?.textContent ?? "";
+}

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { hardwareProblems, networkProblems, problemsUpTo, storageProblems } from "./step-checks";
+import { backupProblems, hardwareProblems, networkProblems, problemsUpTo, storageProblems } from "./step-checks";
 import { required } from "./validation";
-import { bond, bridge, cluster, disks, network, nics, persistedState } from "./test-fixtures";
+import { backupPlan, bond, bridge, cluster, disks, network, nics, persistedState } from "./test-fixtures";
 
 // a node whose every required field is filled
 const complete = () => persistedState({ nodes: cluster(3, { ramGb: "64", bootDiskSizeGb: "512" }) });
@@ -95,13 +95,30 @@ describe("networkProblems", () => {
         bridges: {
           "nic-0#0": bridge({ name: "vmbr0" }),
           "nic-1#0": bridge({ name: "vmbr1", purposes: ["vm"], ip: "" }),
-          "nic-2#0": bridge({ name: "vmbr2", purposes: ["ceph"], ip: "" }),
+          "nic-2#0": bridge({ name: "vmbr2", purposes: ["backup"], ip: "" }),
         },
       }),
     });
     const fields = networkProblems({ ...complete(), nodes }).map((p) => p.field);
     expect(fields).toContain("bridge vmbr1 network");
     expect(fields).toContain("bridge vmbr2 static ip");
+  });
+
+  // ceph/zfs off management is a storage link: the address sits on the
+  // nic itself, so there's no bridge name to check and problems name the nic
+  it("names a storage link after its nic and checks no bridge name", () => {
+    const n = nics("1gbe", "10gbe");
+    n[1].name = "storage";
+    const nodes = cluster(1, {
+      nics: n,
+      network: network({
+        bridgeCounts: { "nic-0": "1", "nic-1": "1" },
+        bridges: { "nic-0#0": bridge({ name: "vmbr0" }), "nic-1#0": bridge({ name: "", purposes: ["ceph"], ip: "" }) },
+      }),
+    });
+    const fields = networkProblems({ ...complete(), nodes }).map((p) => p.field);
+    expect(fields).toContain("storage link storage static ip");
+    expect(fields.some((f) => f.endsWith(" name") && f.includes("storage"))).toBe(false);
   });
 
   // the management bridge's address is the node's static ip, asked once
@@ -138,6 +155,14 @@ describe("networkProblems", () => {
   });
 });
 
+describe("the dns server", () => {
+  it("is required and must be an ip", () => {
+    expect(networkProblems({ ...complete(), dns: "" }).map((p) => p.field)).toContain("dns server");
+    expect(networkProblems({ ...complete(), dns: "dns.lan" }).map((p) => p.field)).toContain("dns server");
+    expect(networkProblems(complete()).map((p) => p.field)).not.toContain("dns server");
+  });
+});
+
 describe("storageProblems", () => {
   it("finds nothing wrong with the defaults", () => {
     expect(storageProblems(complete())).toEqual([]);
@@ -170,6 +195,55 @@ describe("storageProblems", () => {
   });
 });
 
+describe("backupProblems", () => {
+  const fields = (plan: Parameters<typeof backupPlan>[0]) =>
+    backupProblems({ ...complete(), backups: backupPlan(plan) }).map((p) => p.field);
+
+  it("finds nothing wrong with a complete plan", () => {
+    expect(fields({})).toEqual([]);
+  });
+
+  // the defaults leave the one thing only the visitor knows blank
+  it("requires the pbs address", () => {
+    expect(fields({ pbsAddress: "" })).toEqual(["pbs address"]);
+  });
+
+  it("checks only the chosen target's own fields", () => {
+    expect(fields({ target: "pbs-vm", pbsAddress: "" })).toEqual([]);
+    expect(fields({ target: "pbs-vm", datastore: "" })).toEqual(["datastore"]);
+    expect(fields({ target: "nfs", datastore: "" })).toEqual(["nfs server", "export path"]);
+    expect(fields({ target: "nfs", nfsServer: "nas", nfsExport: "/volume1/pve" })).toEqual([]);
+  });
+
+  it("checks the time and every retention count", () => {
+    expect(fields({ schedule: "25:00", keepDaily: "", keepWeekly: "-1" })).toEqual([
+      "backup time",
+      "keep daily",
+      "keep weekly",
+    ]);
+  });
+
+  it("won't take retention that keeps nothing", () => {
+    expect(fields({ keepLast: "0", keepDaily: "0", keepWeekly: "0", keepMonthly: "0" })).toEqual(["retention"]);
+  });
+
+  it("needs the off-site address only with an off-site copy", () => {
+    expect(fields({ offsite: true })).toEqual(["off-site pbs address"]);
+    expect(fields({ offsite: true, offsiteAddress: "pbs.offsite.example" })).toEqual([]);
+    // nfs has no pbs sync, so a leftover tick means nothing
+    expect(fields({ target: "nfs", nfsServer: "nas", nfsExport: "/x", offsite: true })).toEqual([]);
+  });
+
+  // "no backups" is warned about, not blocked — it's the visitor's call
+  it("blocks nothing with no backups", () => {
+    expect(fields({ target: "none", pbsAddress: "", schedule: "" })).toEqual([]);
+  });
+
+  it("labels its problems as step 4's", () => {
+    expect(backupProblems({ ...complete(), backups: backupPlan({ pbsAddress: "" }) })[0].step).toBe("backups");
+  });
+});
+
 describe("problemsUpTo", () => {
   // a later step is built on the earlier ones
   it("includes every earlier step's problems", () => {
@@ -178,9 +252,13 @@ describe("problemsUpTo", () => {
     expect(problemsUpTo("hardware", state).map((p) => p.step)).toEqual(["hardware"]);
     expect(problemsUpTo("network", state).map((p) => p.step)).toEqual(["hardware", "network"]);
     expect(problemsUpTo("storage", state).map((p) => p.step)).toEqual(["hardware", "network"]);
+    state.backups = backupPlan({ pbsAddress: "" });
+    expect(problemsUpTo("storage", state).map((p) => p.step)).toEqual(["hardware", "network"]);
+    expect(problemsUpTo("backups", state).map((p) => p.step)).toEqual(["hardware", "network", "backups"]);
   });
 
   it("is empty for a complete plan", () => {
     expect(problemsUpTo("storage", complete())).toEqual([]);
+    expect(problemsUpTo("backups", complete())).toEqual([]);
   });
 });

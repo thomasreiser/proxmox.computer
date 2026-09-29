@@ -44,10 +44,17 @@ src/app/setup/
   derive.ts         defaults, address derivation, conflicts, cross-node sync
   hints.ts          advisories (Hint = { tone, glyph, text }); never block progress
   storage.ts        step 3 logic: disk roles, capacity maths, storage hints
+  backups.ts        step 4 logic: targets, retention, validators, backup hints
+  step-checks.ts    per-step blocking problems; problemsUpTo(step) gates every hand-off
   cpu.ts            cpu family catalog and qemu type resolution
+  answer-file.ts    each node's answer.toml for the unattended installer; never names
+                    a device (boot disk stays CHANGE-ME) and never writes a password
+                    — embeds the whole PersistedState as a base64 comment line, which
+                    readAnswerToml() reads back; src/app/open-setup.tsx reopens it
   test-fixtures.ts  node(), cluster(), nics(), disks(), bridge(), bond(), network(),
-                    persistedState() — a complete valid save
-  wizard-test-helpers.tsx  renderAtNetworkStep / renderAtStorageStep, waitForSave,
+                    backupPlan(), persistedState() — a complete valid save
+  wizard-test-helpers.tsx  renderAtNetworkStep / renderAtStorageStep /
+                    renderAtBackupsStep (slow; prefer restoring a save), waitForSave,
                     addSpareDisk / addTwoSpareDisks, clusterStorage — shared by the
                     wizard integration tests
   preview/<step>/   one React Flow diagram per step; a pure builder
@@ -73,6 +80,8 @@ src/test/router.ts      the router spy every component sees — assert router.pu
   - disk roles → `withEffectiveDiskRoles()`. `""` means unchosen; that and a role that's no longer offered both resolve to the first enabled mode, or `local`.
   - ceph replicas → `effectiveCephPlan()`; the zfs layout → `effectiveRaidLevel()`; a NIC's connector → `effectivePort()`.
   - Never write a clamped value back from an effect. The wizard starts at one node, so a write-back clamp permanently destroys defaults and choices.
+- **Ceph and zfs traffic never get a bridge.** On any interface but management, ceph/zfs make the interface's native slot a *storage link* (`isStorageLink`): the host IP goes directly on the NIC or bond, it carries only storage purposes, and it has no extra VLAN bridges. The slot still lives in `bridges` (its `name` is kept for switching back but never used or name-checked). `enforceStorageLinks()` holds a network to these rules after every bridge edit. The management bridge may still share ceph/zfs, since it exists for the web UI anyway.
+- **Static IPs carry their network's prefix** (`10.0.10.11/24`: address .11 in the 10.0.10.0/24 network), exactly as Proxmox and `/etc/network/interfaces` write it. Never propose /32: it leaves the node alone on its link, with no route to its gateway or its peers. `hostCidrMeaning()` spells the value out under every static-IP field and flags a /32.
 - **Don't allow invalid input where the valid set is known.** Offer only valid options (e.g. `replicaChoices(nodeCount)`) instead of accepting any value and warning afterwards. Hints are for choices that are valid but unwise.
 - **Effects must not loop.** An effect that calls `setNodes` re-runs whenever its dependencies change, so it needs reference-stable dependencies (memoize arrays on their primitive inputs, not on a freshly built object), and a transform that returns the *same* array when nothing changed (see `withoutPurposes`). Getting either wrong renders forever, which in tests shows up as a suite that hangs rather than fails.
 - **Intent, never device identity.** The wizard records roles, speeds and sizes. It never asks for `enp3s0`, `/dev/sdX` or MACs. Those come from the machines in a later phase (see `/how-it-works`).

@@ -2,11 +2,14 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useMemo, useState } from "react";
 import wizardSteps from "@/data/wizard-steps.json";
 import {
   BOND_MODE_OPTIONS,
   bridgeCountFor,
+  interfaceNameFor,
+  isStorageLink,
+  isStoragePurpose,
   bridgeKey,
   interfacesFor,
   loadPersistedState,
@@ -39,6 +42,7 @@ import {
   type ClusterStorage,
   type StorageMode,
   enabledStorageModes,
+  type BackupPlan,
   type StoragePlan,
   type WizardStepId,
 } from "./wizard-state";
@@ -72,6 +76,26 @@ import {
   ZFS_RAID_OPTIONS,
 } from "./storage";
 import { problemsUpTo } from "./step-checks";
+import {
+  BACKUP_TARGET_OPTIONS,
+  RETENTION_FIELDS,
+  backupNicHint,
+  backupSizeHint,
+  maxGuestDataGb,
+  defaultBackupPlan,
+  encryptionHint,
+  maxBackupsKept,
+  noBackupHint,
+  offsiteHint,
+  retentionHint,
+  retentionReach,
+  sameHardwareHint,
+  usesPbs,
+  validateExportPath,
+  validateHostAddress,
+  validateRetention,
+  validateScheduleTime,
+} from "./backups";
 import { ProblemList } from "./problem-list";
 import {
   isValidIPv4,
@@ -79,6 +103,7 @@ import {
   validateCidr,
   validateFriendlyName,
   validateHostCidr,
+  hostCidrMeaning,
   validateHostLabel,
   validateHostnameSuffix,
   validateIntRange,
@@ -120,9 +145,10 @@ import {
   defaultNic,
   defaultNode,
   deriveGateway,
+  followGateway,
   deriveNodeCidr,
   effectiveClusterStorage,
-  isDedicatedStorageBondPurpose,
+  enforceStorageLinks,
   maxBondsForCluster,
   minAdditionalDisks,
   nextVmbrName,
@@ -131,6 +157,8 @@ import {
   resyncNetworkForNics,
   siblingVlanTagsFor,
   withoutPurposes,
+  withHardwareOf,
+  resizeNodes,
   applyStorageRoles,
   defaultStoragePlan,
   type NodeNames,
@@ -278,6 +306,7 @@ function CidrField({
   placeholder,
   defaultPrefix = 24,
   required = false,
+  host = false,
 }: {
   id: string;
   label: string;
@@ -300,6 +329,9 @@ function CidrField({
   // or bridge, so default to the real subnet size instead.
   defaultPrefix?: number;
   required?: boolean;
+  // a static ip rather than a network: spells out what the prefix means,
+  // and flags a /32 (see hostCidrMeaning)
+  host?: boolean;
 }) {
   const [showDetails, setShowDetails] = useState(false);
   // an empty field's placeholder is just an example, not a value it
@@ -311,6 +343,7 @@ function CidrField({
   const info = subnetDetails(value);
   const reveal = useContext(RevealErrorsContext);
   const showError = (touched || reveal) && error;
+  const meaning = host && !showError ? hostCidrMeaning(value) : null;
 
   function handleBlur() {
     setTouched(true);
@@ -346,6 +379,12 @@ function CidrField({
         </button>
       </div>
       <span className="body-sm pc-field__hint">{showError ? error : hint}</span>
+      {meaning && (
+        <span className={`body-sm pc-field__meaning${meaning.warn ? " pc-field__meaning--warn" : ""}`}>
+          {meaning.warn && "⚠ "}
+          {meaning.text}
+        </span>
+      )}
       {showDetails && info && (
         <div className="pc-table-wrap">
           <table className="pc-table">
@@ -1029,8 +1068,6 @@ function ExtraBridgeCard({
   siblingVlanTags,
   names,
   purposeOptions,
-  storagePurposes,
-  storagePurposeMissingHint,
   nicSpeeds,
   onBridgeChange,
   address,
@@ -1042,9 +1079,8 @@ function ExtraBridgeCard({
   bridge: BridgeConfig;
   siblingVlanTags: string[];
   names: NodeNames;
+  // bridge purposes only — ceph and zfs never ride an extra bridge
   purposeOptions: PurposeInfo[];
-  storagePurposes: InterfacePurpose[];
-  storagePurposeMissingHint: ReactNode;
   // the physical nics behind this bridge's interface — only used to check
   // whether a ceph purpose here is riding a fast enough link.
   nicSpeeds: NicSpeed[];
@@ -1123,7 +1159,6 @@ function ExtraBridgeCard({
             </label>
           );
         })}
-        {storagePurposes.length === 0 && storagePurposeMissingHint}
       </fieldset>
 
       {[comboHint, cephSpeedHint]
@@ -1187,6 +1222,7 @@ function ExtraBridgeCard({
         <CidrField
           id={`bridgeip-${keyPrefix}-${bridgeId}`}
           label={needsHostIp ? "static ip for this node" : "network"}
+          host={needsHostIp}
           usedFor={purposesUsedForLabel(bridge.purposes)}
           value={bridge.ip}
           onChange={(value) => onBridgeChange(bridgeId, { ip: value })}
@@ -1340,6 +1376,10 @@ function NetworkStructureFields({
   const purposeOptions = INTERFACE_PURPOSE_OPTIONS.filter(
     (opt) => (opt.value !== "ceph" && opt.value !== "zfs") || storagePurposes.includes(opt.value),
   );
+  // off the management interface these never mix: ceph and zfs make an
+  // interface a storage link, everything else rides a bridge
+  const storageOptions = purposeOptions.filter((opt) => isStoragePurpose(opt.value));
+  const bridgeOptions = purposeOptions.filter((opt) => !isStoragePurpose(opt.value));
   const managementComboHint = purposeComboHint(managementBridge?.purposes ?? []);
   const vmTrafficHint = vmTrafficHintFor(node.network.bridges);
   const backupHint = backupHintFor(node.network.bridges);
@@ -1458,9 +1498,10 @@ function NetworkStructureFields({
         const isManagement = iface.id === node.network.managementInterfaceId;
         const count = bridgeCountFor(node.network.bridgeCounts, iface.id);
         const bridge = node.network.bridges[bridgeKey(iface.id, 0)];
-        // ceph/zfs get the whole bond — no extra vlan-tagged bridges to
-        // split its bandwidth or latency budget with anything else.
-        const isDedicatedStorageBond = iface.id.startsWith("bond-") && isDedicatedStorageBondPurpose(bridge?.purposes ?? []);
+        // ceph/zfs here make it a storage link: the address goes on the
+        // nic or bond itself — no bridge, and nothing else shares it
+        const storageLink = isStorageLink(node.network, bridgeKey(iface.id, 0));
+        const ifaceName = interfaceNameFor(iface.id, node.nics, node.network.bonds);
 
         return (
           <div key={iface.id} className="flex flex-col border border-border bg-surface-100 p-5" style={{ gap: "var(--space-3)" }}>
@@ -1487,17 +1528,54 @@ function NetworkStructureFields({
                       />
                       <span className="pc-checkbox__box" />
                       <span>
-                        <span className="code pc-checkbox__label">bridge this interface</span>
+                        <span className="code pc-checkbox__label">use this interface</span>
                         <span className="body-sm pc-checkbox__hint">
-                          a linux bridge on it — leave unchecked to keep it unused for now
+                          for vm bridges, or as a storage link — leave unchecked to keep it unused for now
                         </span>
                       </span>
                     </label>
                     {bridge.enabled && (
                       <>
+                        {storageOptions.length > 0 && (
+                          <fieldset className="pc-radio-group" style={{ border: 0, margin: 0, padding: 0 }}>
+                            <legend className="label pc-radio-group__legend">carries</legend>
+                            <label className="pc-radio">
+                              <input
+                                type="radio"
+                                name={`carries-${keyPrefix}-${key0}`}
+                                checked={!storageLink}
+                                onChange={() => onBridgeChange(key0, { purposes: ["vm"] })}
+                              />
+                              <span className="pc-radio__box" />
+                              <span>
+                                <span className="code pc-radio__label">vm bridges</span>
+                                <span className="body-sm pc-checkbox__hint">
+                                  linux bridges for vms and cts, backups or corosync — split into vlan-tagged bridges
+                                  if it needs more than one
+                                </span>
+                              </span>
+                            </label>
+                            <label className="pc-radio">
+                              <input
+                                type="radio"
+                                name={`carries-${keyPrefix}-${key0}`}
+                                checked={storageLink}
+                                onChange={() => onBridgeChange(key0, { purposes: [storageOptions[0].value] })}
+                              />
+                              <span className="pc-radio__box" />
+                              <span>
+                                <span className="code pc-radio__label">a storage link — ceph / zfs</span>
+                                <span className="body-sm pc-checkbox__hint">
+                                  no bridge: this node&apos;s storage address goes straight onto {ifaceName}, and
+                                  nothing else shares the link — no vm ever joins storage traffic
+                                </span>
+                              </span>
+                            </label>
+                          </fieldset>
+                        )}
                         <fieldset className="pc-radio-group" style={{ border: 0, margin: 0, padding: 0 }}>
                           <legend className="label pc-radio-group__legend">used for (pick as many as apply)</legend>
-                          {purposeOptions.map((opt) => {
+                          {(storageLink ? storageOptions : bridgeOptions).map((opt) => {
                             const checked = bridge.purposes.includes(opt.value);
                             const isLastOne = checked && bridge.purposes.length === 1;
                             return (
@@ -1562,25 +1640,31 @@ function NetworkStructureFields({
                           </fieldset>
                         )}
 
-                        <div className={`pc-field ${bridgeNameError ? "pc-field--error" : ""}`}>
-                          <label className="label pc-field__label" htmlFor={`bridge-${keyPrefix}-${key0}`}>
-                            bridge name
-                            <span className="pc-field__required"> *</span>
-                          </label>
-                          <div className="pc-field__control">
-                            <span className="code pc-field__bracket">$</span>
-                            <input
-                              id={`bridge-${keyPrefix}-${key0}`}
-                              className="pc-field__input code"
-                              type="text"
-                              value={bridge.name}
-                              onChange={(e) => onBridgeChange(key0, { name: e.target.value })}
-                            />
+                        {storageLink ? (
+                          <p className="body-sm pc-field__hint">
+                            no bridge name — {ifaceName} carries the address itself
+                          </p>
+                        ) : (
+                          <div className={`pc-field ${bridgeNameError ? "pc-field--error" : ""}`}>
+                            <label className="label pc-field__label" htmlFor={`bridge-${keyPrefix}-${key0}`}>
+                              bridge name
+                              <span className="pc-field__required"> *</span>
+                            </label>
+                            <div className="pc-field__control">
+                              <span className="code pc-field__bracket">$</span>
+                              <input
+                                id={`bridge-${keyPrefix}-${key0}`}
+                                className="pc-field__input code"
+                                type="text"
+                                value={bridge.name}
+                                onChange={(e) => onBridgeChange(key0, { name: e.target.value })}
+                              />
+                            </div>
+                            <span className="body-sm pc-field__hint">
+                              {bridgeNameError ?? "shown in the proxmox ui and used in vm/ct network config"}
+                            </span>
                           </div>
-                          <span className="body-sm pc-field__hint">
-                            {bridgeNameError ?? "shown in the proxmox ui and used in vm/ct network config"}
-                          </span>
-                        </div>
+                        )}
 
                         {/* a real per-node static ip stays out of this
                             shared block entirely — NetworkAddressFields
@@ -1614,10 +1698,10 @@ function NetworkStructureFields({
                 );
               })()}
 
-            {isDedicatedStorageBond ? (
+            {storageLink ? (
               <p className="body-sm pc-field__hint">
-                bridges on this interface — locked to 1: {bridge?.purposes.includes("ceph") ? "ceph" : "zfs replication"} gets this
-                bond to itself, so it can&apos;t be split into extra vlan-tagged bridges for anything else.
+                no vlan-tagged bridges here — a storage link has no bridge to split, and{" "}
+                {bridge?.purposes.includes("ceph") ? "ceph" : "zfs replication"} gets {ifaceName} to itself.
               </p>
             ) : (
               <>
@@ -1642,9 +1726,7 @@ function NetworkStructureFields({
                       bridge={extraBridge}
                       siblingVlanTags={siblingVlanTagsFor(node.network.bridges, count, iface.id, index)}
                       names={names}
-                      purposeOptions={purposeOptions}
-                      storagePurposes={storagePurposes}
-                      storagePurposeMissingHint={storagePurposeMissingHint}
+                      purposeOptions={bridgeOptions}
                       nicSpeeds={nicSpeedsForInterface(iface.id, node.nics, node.network.bonds)}
                       onBridgeChange={onBridgeChange}
                       // same split as the first bridge above — a real static
@@ -1757,6 +1839,7 @@ function NetworkAddressFields({
       <CidrField
         id={`nodecidr-${keyPrefix}`}
         label="static ip"
+        host
         usedFor={["management", ...(managementBridge?.purposes.map((p) => purposeInfoFor(p).label) ?? [])].join(", ")}
         value={node.network.cidr}
         onChange={(value) => onChange({ cidr: value })}
@@ -1782,7 +1865,12 @@ function NetworkAddressFields({
           <CidrField
             key={key}
             id={`bridgeip-${keyPrefix}-${key}`}
-            label={`${bridge.name} — static ip for this node`}
+            label={`${
+              isStorageLink(node.network, key)
+                ? interfaceNameFor(key.split("#")[0], node.nics, node.network.bonds)
+                : bridge.name
+            } — static ip for this node`}
+            host
             usedFor={purposesUsedForLabel(bridge.purposes)}
             value={bridge.ip}
             onChange={(value) => onBridgeChange(key, { ip: value })}
@@ -1869,6 +1957,10 @@ function NetworkFields({
   const purposeOptions = INTERFACE_PURPOSE_OPTIONS.filter(
     (opt) => (opt.value !== "ceph" && opt.value !== "zfs") || storagePurposes.includes(opt.value),
   );
+  // off the management interface these never mix: ceph and zfs make an
+  // interface a storage link, everything else rides a bridge
+  const storageOptions = purposeOptions.filter((opt) => isStoragePurpose(opt.value));
+  const bridgeOptions = purposeOptions.filter((opt) => !isStoragePurpose(opt.value));
   const managementComboHint = purposeComboHint(managementBridge?.purposes ?? []);
   const managementCidrPlaceholder = deriveNodeCidr(globalCidr, nodeIndex) || "10.0.10.11/24";
   const addressKeys = addressableBridgeKeys(node);
@@ -1926,6 +2018,7 @@ function NetworkFields({
         <CidrField
           id={`nodecidr-${keyPrefix}`}
           label="static ip"
+          host
           usedFor={["management", ...(managementBridge?.purposes.map((p) => purposeInfoFor(p).label) ?? [])].join(", ")}
           value={node.network.cidr}
           onChange={(value) => onChange({ cidr: value })}
@@ -2023,9 +2116,10 @@ function NetworkFields({
         const isManagement = iface.id === node.network.managementInterfaceId;
         const count = bridgeCountFor(node.network.bridgeCounts, iface.id);
         const bridge = node.network.bridges[bridgeKey(iface.id, 0)];
-        // ceph/zfs get the whole bond — no extra vlan-tagged bridges to
-        // split its bandwidth or latency budget with anything else.
-        const isDedicatedStorageBond = iface.id.startsWith("bond-") && isDedicatedStorageBondPurpose(bridge?.purposes ?? []);
+        // ceph/zfs here make it a storage link: the address goes on the
+        // nic or bond itself — no bridge, and nothing else shares it
+        const storageLink = isStorageLink(node.network, bridgeKey(iface.id, 0));
+        const ifaceName = interfaceNameFor(iface.id, node.nics, node.network.bonds);
 
         return (
           <div key={iface.id} className="flex flex-col border border-border bg-surface-100 p-5" style={{ gap: "var(--space-3)" }}>
@@ -2056,17 +2150,54 @@ function NetworkFields({
                       />
                       <span className="pc-checkbox__box" />
                       <span>
-                        <span className="code pc-checkbox__label">bridge this interface</span>
+                        <span className="code pc-checkbox__label">use this interface</span>
                         <span className="body-sm pc-checkbox__hint">
-                          a linux bridge on it — leave unchecked to keep it unused for now
+                          for vm bridges, or as a storage link — leave unchecked to keep it unused for now
                         </span>
                       </span>
                     </label>
                     {bridge.enabled && (
                       <>
+                        {storageOptions.length > 0 && (
+                          <fieldset className="pc-radio-group" style={{ border: 0, margin: 0, padding: 0 }}>
+                            <legend className="label pc-radio-group__legend">carries</legend>
+                            <label className="pc-radio">
+                              <input
+                                type="radio"
+                                name={`carries-${keyPrefix}-${key0}`}
+                                checked={!storageLink}
+                                onChange={() => onBridgeChange(key0, { purposes: ["vm"] })}
+                              />
+                              <span className="pc-radio__box" />
+                              <span>
+                                <span className="code pc-radio__label">vm bridges</span>
+                                <span className="body-sm pc-checkbox__hint">
+                                  linux bridges for vms and cts, backups or corosync — split into vlan-tagged bridges
+                                  if it needs more than one
+                                </span>
+                              </span>
+                            </label>
+                            <label className="pc-radio">
+                              <input
+                                type="radio"
+                                name={`carries-${keyPrefix}-${key0}`}
+                                checked={storageLink}
+                                onChange={() => onBridgeChange(key0, { purposes: [storageOptions[0].value] })}
+                              />
+                              <span className="pc-radio__box" />
+                              <span>
+                                <span className="code pc-radio__label">a storage link — ceph / zfs</span>
+                                <span className="body-sm pc-checkbox__hint">
+                                  no bridge: this node&apos;s storage address goes straight onto {ifaceName}, and
+                                  nothing else shares the link — no vm ever joins storage traffic
+                                </span>
+                              </span>
+                            </label>
+                          </fieldset>
+                        )}
                         <fieldset className="pc-radio-group" style={{ border: 0, margin: 0, padding: 0 }}>
                           <legend className="label pc-radio-group__legend">used for (pick as many as apply)</legend>
-                          {purposeOptions.map((opt) => {
+                          {(storageLink ? storageOptions : bridgeOptions).map((opt) => {
                             const checked = bridge.purposes.includes(opt.value);
                             const isLastOne = checked && bridge.purposes.length === 1;
                             return (
@@ -2131,29 +2262,36 @@ function NetworkFields({
                           </fieldset>
                         )}
 
-                        <div className={`pc-field ${bridgeNameError ? "pc-field--error" : ""}`}>
-                          <label className="label pc-field__label" htmlFor={`bridge-${keyPrefix}-${key0}`}>
-                            bridge name
-                            <span className="pc-field__required"> *</span>
-                          </label>
-                          <div className="pc-field__control">
-                            <span className="code pc-field__bracket">$</span>
-                            <input
-                              id={`bridge-${keyPrefix}-${key0}`}
-                              className="pc-field__input code"
-                              type="text"
-                              value={bridge.name}
-                              onChange={(e) => onBridgeChange(key0, { name: e.target.value })}
-                            />
+                        {storageLink ? (
+                          <p className="body-sm pc-field__hint">
+                            no bridge name — {ifaceName} carries the address itself
+                          </p>
+                        ) : (
+                          <div className={`pc-field ${bridgeNameError ? "pc-field--error" : ""}`}>
+                            <label className="label pc-field__label" htmlFor={`bridge-${keyPrefix}-${key0}`}>
+                              bridge name
+                              <span className="pc-field__required"> *</span>
+                            </label>
+                            <div className="pc-field__control">
+                              <span className="code pc-field__bracket">$</span>
+                              <input
+                                id={`bridge-${keyPrefix}-${key0}`}
+                                className="pc-field__input code"
+                                type="text"
+                                value={bridge.name}
+                                onChange={(e) => onBridgeChange(key0, { name: e.target.value })}
+                              />
+                            </div>
+                            <span className="body-sm pc-field__hint">
+                              {bridgeNameError ?? "shown in the proxmox ui and used in vm/ct network config"}
+                            </span>
                           </div>
-                          <span className="body-sm pc-field__hint">
-                            {bridgeNameError ?? "shown in the proxmox ui and used in vm/ct network config"}
-                          </span>
-                        </div>
+                        )}
 
                         <CidrField
                           id={`bridgeip-${keyPrefix}-${key0}`}
                           label={needsHostIp ? "static ip for this node" : "network"}
+                          host={needsHostIp}
                           usedFor={purposesUsedForLabel(bridge.purposes)}
                           value={bridge.ip}
                           onChange={(value) => onBridgeChange(key0, { ip: value })}
@@ -2165,7 +2303,9 @@ function NetworkFields({
                           })()}
                           error={ipError}
                           hint={
-                            needsHostIp
+                            storageLink
+                              ? `${requiredIpHintFor(bridge.purposes, bridge.otherNeedsHostIp)} — set directly on ${ifaceName}`
+                              : needsHostIp
                               ? requiredIpHintFor(bridge.purposes, bridge.otherNeedsHostIp)
                               : "the subnet vms/cts on this bridge should use — the host itself still won't have an address here"
                           }
@@ -2178,10 +2318,10 @@ function NetworkFields({
                 );
               })()}
 
-            {isDedicatedStorageBond ? (
+            {storageLink ? (
               <p className="body-sm pc-field__hint">
-                bridges on this interface — locked to 1: {bridge?.purposes.includes("ceph") ? "ceph" : "zfs replication"} gets this
-                bond to itself, so it can&apos;t be split into extra vlan-tagged bridges for anything else.
+                no vlan-tagged bridges here — a storage link has no bridge to split, and{" "}
+                {bridge?.purposes.includes("ceph") ? "ceph" : "zfs replication"} gets {ifaceName} to itself.
               </p>
             ) : (
               <>
@@ -2205,9 +2345,7 @@ function NetworkFields({
                       bridge={extraBridge}
                       siblingVlanTags={siblingVlanTagsFor(node.network.bridges, count, iface.id, index)}
                       names={names}
-                      purposeOptions={purposeOptions}
-                      storagePurposes={storagePurposes}
-                      storagePurposeMissingHint={storagePurposeMissingHint}
+                      purposeOptions={bridgeOptions}
                       nicSpeeds={nicSpeedsForInterface(iface.id, node.nics, node.network.bonds)}
                       onBridgeChange={onBridgeChange}
                       address={{
@@ -2279,6 +2417,55 @@ function PoolNameField({
   );
 }
 
+/**
+ * A free-text field with its own validator, for step 4's addresses, paths
+ * and times. Like CidrField it holds its error back until the field has
+ * been left once — or until a blocked "preview" reveals every error.
+ */
+function CheckedTextField({
+  id,
+  label,
+  hint,
+  value,
+  placeholder,
+  validate,
+  onChange,
+}: {
+  id: string;
+  label: string;
+  hint: string;
+  value: string;
+  placeholder?: string;
+  validate: (value: string) => string | null;
+  onChange: (value: string) => void;
+}) {
+  const [touched, setTouched] = useState(false);
+  const reveal = useContext(RevealErrorsContext);
+  const error = validate(value);
+  const showError = (touched || reveal) && error;
+  return (
+    <div className={`pc-field ${showError ? "pc-field--error" : ""}`}>
+      <label className="label pc-field__label" htmlFor={id}>
+        {label}
+        <span className="pc-field__required"> *</span>
+      </label>
+      <div className="pc-field__control">
+        <span className="code pc-field__bracket">$</span>
+        <input
+          id={id}
+          className="pc-field__input code"
+          type="text"
+          value={value}
+          placeholder={placeholder ? `e.g. ${placeholder}` : undefined}
+          onChange={(e) => onChange(e.target.value)}
+          onBlur={() => setTouched(true)}
+        />
+      </div>
+      <span className="body-sm pc-field__hint">{showError ? error : hint}</span>
+    </div>
+  );
+}
+
 export default function Setup() {
   const router = useRouter();
   const [currentStep, setCurrentStep] = useState<WizardStepId>("hardware");
@@ -2286,6 +2473,7 @@ export default function Setup() {
   const [hostnameSuffix, setHostnameSuffix] = useState("homelab.lan");
   const [globalCidr, setGlobalCidr] = useState("10.0.10.0/24");
   const [gateway, setGateway] = useState(() => deriveGateway("10.0.10.0/24"));
+  const [dns, setDns] = useState(() => deriveGateway("10.0.10.0/24"));
   const [homelabVlan, setHomelabVlan] = useState("");
   const [nodes, setNodes] = useState<NodeInfo[]>([defaultNode(0, "10.0.10.0/24")]);
   const [identicalHardware, setIdenticalHardware] = useState(false);
@@ -2293,6 +2481,7 @@ export default function Setup() {
   const [clusterStorage, setClusterStorage] = useState<ClusterStorage>({ ceph: true, zfs: false });
   const [storage, setStorage] = useState<StoragePlan>(defaultStoragePlan);
   const [identicalStorage, setIdenticalStorage] = useState(false);
+  const [backups, setBackups] = useState<BackupPlan>(defaultBackupPlan);
   // gates the save effect below so it never fires with the initial default
   // state before the restore attempt (which may replace that state) has
   // actually run — otherwise a freshly-loaded save could get clobbered by
@@ -2315,6 +2504,7 @@ export default function Setup() {
       setHostnameSuffix(saved.hostnameSuffix);
       setGlobalCidr(saved.globalCidr);
       setGateway(saved.gateway);
+      setDns(saved.dns);
       setHomelabVlan(saved.homelabVlan);
       setNodes(saved.nodes);
       setIdenticalHardware(saved.identicalHardware);
@@ -2322,6 +2512,7 @@ export default function Setup() {
       setClusterStorage(saved.clusterStorage);
       setStorage(saved.storage);
       setIdenticalStorage(saved.identicalStorage);
+      setBackups(saved.backups);
     }
     setHydrated(true);
   }, []);
@@ -2340,6 +2531,7 @@ export default function Setup() {
           hostnameSuffix,
           globalCidr,
           gateway,
+          dns,
           homelabVlan,
           nodes,
           identicalHardware,
@@ -2347,6 +2539,7 @@ export default function Setup() {
           clusterStorage,
           storage,
           identicalStorage,
+          backups,
         };
         window.localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
       } catch {
@@ -2361,6 +2554,7 @@ export default function Setup() {
     hostnameSuffix,
     globalCidr,
     gateway,
+    dns,
     homelabVlan,
     nodes,
     identicalHardware,
@@ -2368,6 +2562,7 @@ export default function Setup() {
     clusterStorage,
     storage,
     identicalStorage,
+    backups,
   ]);
 
   const quorumHint = useMemo(() => quorumHintFor(nodes.length), [nodes.length]);
@@ -2471,6 +2666,20 @@ export default function Setup() {
   // stops applying, and comes back if it's offered again
   /* eslint-enable react-hooks/set-state-in-effect */
 
+  // ── step 4 derivations ───────────────────────────────────────────────
+  // the most a full backup can reach — the storage planned in step 3, full
+  const guestDataGb = useMemo(() => maxGuestDataGb(nodes, clusterStorage, storage), [nodes, clusterStorage, storage]);
+  const backupHints = [
+    noBackupHint(backups.target),
+    sameHardwareHint(backups.target, backups.offsite),
+    retentionHint(backups),
+    encryptionHint(backups),
+    offsiteHint(backups.target, backups.offsite),
+    backupNicHint(nodes, backups.target),
+    backupSizeHint(guestDataGb, backups),
+  ];
+  const setBackup = (patch: Partial<BackupPlan>) => setBackups((b) => ({ ...b, ...patch }));
+
   // ── the gate ──────────────────────────────────────────────────────────
   // everything blocking this step and the ones before it, from the live
   // form — the same checks the preview pages apply to the saved state
@@ -2482,11 +2691,13 @@ export default function Setup() {
         hostnameSuffix,
         globalCidr,
         gateway,
+        dns,
         homelabVlan,
         clusterStorage,
         storage,
+        backups,
       }),
-    [currentStep, nodeCount, nodes, hostnameSuffix, globalCidr, gateway, homelabVlan, clusterStorage, storage],
+    [currentStep, nodeCount, nodes, hostnameSuffix, globalCidr, gateway, dns, homelabVlan, clusterStorage, storage, backups],
   );
   // set by a blocked "preview": from then on every field shows its error,
   // and the list below says what's left. cleared on a step switch, so
@@ -2518,7 +2729,9 @@ export default function Setup() {
     setNodeCount(value);
     const n = parseInt(value, 10);
     if (!Number.isNaN(n) && n >= 1 && n <= 16) {
-      setNodes((prev) => resizeArray(prev, n, (i) => defaultNode(i, globalCidr)));
+      setNodes((prev) =>
+        resizeNodes(prev, n, globalCidr, { hardware: identicalHardware, network: identicalNetwork }),
+      );
     }
   }
 
@@ -2527,23 +2740,7 @@ export default function Setup() {
     if (checked) {
       setNodes((prev) => {
         if (prev.length === 0) return prev;
-        const template = prev[0];
-        return prev.map((node) => ({
-          ...node,
-          cpuVendor: template.cpuVendor,
-          cpuFamily: template.cpuFamily,
-          cpuCount: template.cpuCount,
-          coresPerCpu: template.coresPerCpu,
-          ramGb: template.ramGb,
-          bootDiskType: template.bootDiskType,
-          bootDiskSizeGb: template.bootDiskSizeGb,
-          bootDiskName: template.bootDiskName,
-          additionalDiskCount: template.additionalDiskCount,
-          additionalDisks: template.additionalDisks.map((d) => ({ ...d })),
-          nicCount: template.nicCount,
-          nics: template.nics.map((n) => ({ ...n })),
-          network: resyncNetworkForNics(node.network, template.nics.length),
-        }));
+        return prev.map((node) => withHardwareOf(node, prev[0]));
       });
     }
   }
@@ -2703,9 +2900,15 @@ export default function Setup() {
     );
   }
 
+  // the dns server follows the gateway until it's set to something else
+  function changeGateway(next: string) {
+    setDns((current) => followGateway(current, gateway, next));
+    setGateway(next);
+  }
+
   function handleGlobalCidrChange(value: string) {
     setGlobalCidr(value);
-    setGateway(deriveGateway(value));
+    changeGateway(deriveGateway(value));
     setNodes((prev) =>
       prev.map((node, i) => ({
         ...node,
@@ -2759,31 +2962,13 @@ export default function Setup() {
       );
       const editedBridge = updated[index].network.bridges[interfaceId];
 
-      // ceph/zfs claim the whole bond (see isDedicatedStorageBondPurpose)
-      // — the moment a bond's own native bridge picks up either purpose,
-      // drop any extra vlan-tagged bridges it already had and lock the
-      // count back to 1, rather than leaving them configured but now
-      // forbidden to edit.
-      const [ifaceId, bridgeIndex] = interfaceId.split("#");
-      if (
-        "purposes" in patch &&
-        bridgeIndex === "0" &&
-        ifaceId.startsWith("bond-") &&
-        editedBridge &&
-        isDedicatedStorageBondPurpose(editedBridge.purposes)
-      ) {
-        updated = updated.map((node, i) => {
-          if (i !== index) return node;
-          const currentCount = bridgeCountFor(node.network.bridgeCounts, ifaceId);
-          if (currentCount <= 1) return node;
-          const bridges = { ...node.network.bridges };
-          for (let idx = 1; idx < currentCount; idx++) delete bridges[bridgeKey(ifaceId, idx)];
-          return {
-            ...node,
-            network: { ...node.network, bridgeCounts: { ...node.network.bridgeCounts, [ifaceId]: "1" }, bridges },
-          };
-        });
-      }
+      // ceph/zfs make a storage link, which takes the whole interface
+      // (see enforceStorageLinks) — any extra bridges it had go
+      updated = updated.map((node, i) => {
+        if (i !== index) return node;
+        const network = enforceStorageLinks(node.network);
+        return network === node.network ? node : { ...node, network };
+      });
 
       // a real per-node static ip is always this node's own address —
       // never propagate that. but a pure vm/ct bridge's ip is just its
@@ -2810,12 +2995,9 @@ export default function Setup() {
       const updated = prev.map((node, i) => {
         if (i !== index) return node;
         // belt-and-suspenders alongside the UI hiding this control
-        // entirely: a ceph/zfs bond never gets more than its one native
-        // bridge, no matter what value comes in.
-        const isDedicatedStorageBond =
-          interfaceId.startsWith("bond-") &&
-          isDedicatedStorageBondPurpose(node.network.bridges[bridgeKey(interfaceId, 0)]?.purposes ?? []);
-        if (isDedicatedStorageBond) return node;
+        // entirely: a storage link never gets a bridge, let alone extra
+        // ones, no matter what value comes in.
+        if (isStorageLink(node.network, bridgeKey(interfaceId, 0))) return node;
         const n = parseInt(value, 10);
         const clamped =
           !Number.isNaN(n) && n >= 1 && n <= MAX_BRIDGES_PER_INTERFACE
@@ -2908,6 +3090,7 @@ export default function Setup() {
   const globalCidrError = required(globalCidr, validateCidr);
   const homelabVlanError = validateOptionalVlanTag(homelabVlan);
   const gatewayError = required(gateway, validateIp);
+  const dnsError = required(dns, validateIp);
 
   return (
     <div className="pc-root flex min-h-full flex-col">
@@ -3165,11 +3348,32 @@ export default function Setup() {
                       type="text"
                       placeholder={`e.g. ${deriveGateway(globalCidr) || "10.0.10.1"}`}
                       value={gateway}
-                      onChange={(e) => setGateway(e.target.value)}
+                      onChange={(e) => changeGateway(e.target.value)}
                     />
                   </div>
                   <span className="body-sm pc-field__hint">
                     {gatewayError ?? "default route for every node — usually your router or firewall"}
+                  </span>
+                </div>
+
+                <div className={`pc-field ${dnsError ? "pc-field--error" : ""}`}>
+                  <label className="label pc-field__label" htmlFor="dns">
+                    dns server
+                  </label>
+                  <div className="pc-field__control">
+                    <span className="code pc-field__bracket">#</span>
+                    <input
+                      id="dns"
+                      className="pc-field__input code"
+                      type="text"
+                      placeholder={`e.g. ${gateway || "10.0.10.1"}`}
+                      value={dns}
+                      onChange={(e) => setDns(e.target.value)}
+                    />
+                  </div>
+                  <span className="body-sm pc-field__hint">
+                    {dnsError ??
+                      "what every node resolves names through — follows the gateway, since most routers answer dns too, until you set your own"}
                   </span>
                 </div>
 
@@ -3847,10 +4051,230 @@ export default function Setup() {
               </div>
             </div>
           )}
+
+          {currentStep === "backups" && (
+            <div className="pc-stepflow__card">
+              <p className="meta pc-stepflow__meta"># step 4 of 5</p>
+              <h2 className="h2 pc-stepflow__title">backups</h2>
+              <p className="body pc-stepflow__intro">
+                Ceph and zfs replication keep guests running through a failed
+                node — they copy a deleted file or a corrupted disk to every
+                node just as faithfully. Backups are what let you go back. This
+                decides where they go and how long they&apos;re kept.
+              </p>
+
+              <div className="pc-stepflow__fields">
+                <fieldset className="pc-radio-group" style={{ border: 0, margin: 0, padding: 0 }}>
+                  <legend className="label pc-radio-group__legend">back up to</legend>
+                  {BACKUP_TARGET_OPTIONS.map((opt) => (
+                    <label key={opt.value} className="pc-radio">
+                      <input
+                        type="radio"
+                        name="backup-target"
+                        checked={backups.target === opt.value}
+                        onChange={() => setBackup({ target: opt.value })}
+                      />
+                      <span className="pc-radio__box" />
+                      <span>
+                        <span className="code pc-radio__label">{opt.label}</span>
+                        <span className="body-sm pc-checkbox__hint">{opt.hint}</span>
+                      </span>
+                    </label>
+                  ))}
+                </fieldset>
+
+                {backups.target === "pbs-external" && (
+                  <CheckedTextField
+                    id="pbs-address"
+                    label="pbs address"
+                    hint="where the backup server answers — its ip, or a name your dns resolves"
+                    placeholder="10.0.10.50"
+                    value={backups.pbsAddress}
+                    validate={validateHostAddress}
+                    onChange={(pbsAddress) => setBackup({ pbsAddress })}
+                  />
+                )}
+
+                {usesPbs(backups.target) && (
+                  <PoolNameField
+                    id="pbs-datastore"
+                    label="datastore"
+                    hint="the pbs datastore the cluster writes into — also the storage id proxmox shows"
+                    value={backups.datastore}
+                    onChange={(datastore) => setBackup({ datastore })}
+                  />
+                )}
+
+                {backups.target === "nfs" && (
+                  <>
+                    <CheckedTextField
+                      id="nfs-server"
+                      label="nfs server"
+                      hint="the nas or server exporting the share"
+                      placeholder="nas.homelab.lan"
+                      value={backups.nfsServer}
+                      validate={validateHostAddress}
+                      onChange={(nfsServer) => setBackup({ nfsServer })}
+                    />
+                    <CheckedTextField
+                      id="nfs-export"
+                      label="export path"
+                      hint="the exported directory on that server"
+                      placeholder="/volume1/proxmox"
+                      value={backups.nfsExport}
+                      validate={validateExportPath}
+                      onChange={(nfsExport) => setBackup({ nfsExport })}
+                    />
+                  </>
+                )}
+
+                {backups.target !== "none" && (
+                  <>
+                    <CheckedTextField
+                      id="backup-schedule"
+                      label="backup time"
+                      hint="daily, 24h — pick a quiet hour; every guest on every node is backed up then"
+                      value={backups.schedule}
+                      validate={validateScheduleTime}
+                      onChange={(schedule) => setBackup({ schedule })}
+                    />
+
+                    <div
+                      className="flex flex-col border border-border bg-surface-100 p-5"
+                      style={{ gap: "var(--space-4)" }}
+                    >
+                      <p className="label text-ink-muted">retention</p>
+                      {RETENTION_FIELDS.map((field) => {
+                        const error = validateRetention(backups[field.key]);
+                        return (
+                          <div key={field.key} className={`pc-field ${error ? "pc-field--error" : ""}`}>
+                            <label className="label pc-field__label" htmlFor={`retention-${field.key}`}>
+                              {field.label}
+                            </label>
+                            <div className="pc-field__control">
+                              <input
+                                id={`retention-${field.key}`}
+                                className="pc-field__input code"
+                                type="number"
+                                min={0}
+                                max={1000}
+                                value={backups[field.key]}
+                                onChange={(e) => setBackup({ [field.key]: e.target.value })}
+                              />
+                            </div>
+                            <span className="body-sm pc-field__hint">{error ?? field.hint}</span>
+                          </div>
+                        );
+                      })}
+                      <div className="pc-summary">
+                        <div className="pc-summary__cell">
+                          <span className="label pc-summary__key">backups kept per vm</span>
+                          <span className="code pc-summary__val">up to {maxBackupsKept(backups)}</span>
+                        </div>
+                        <div className="pc-summary__cell">
+                          <span className="label pc-summary__key">oldest reaches back</span>
+                          <span className="code pc-summary__val pc-summary__val--sm">{retentionReach(backups)}</span>
+                        </div>
+                      </div>
+                    </div>
+                  </>
+                )}
+
+                {usesPbs(backups.target) && (
+                  <div
+                    className="flex flex-col border border-border bg-surface-100 p-5"
+                    style={{ gap: "var(--space-4)" }}
+                  >
+                    <p className="label text-ink-muted">proxmox backup server</p>
+                    <label className="pc-checkbox">
+                      <input
+                        type="checkbox"
+                        checked={backups.verify}
+                        onChange={(e) => setBackup({ verify: e.target.checked })}
+                      />
+                      <span className="pc-checkbox__box" />
+                      <span>
+                        <span className="code pc-checkbox__label">verify backups weekly</span>
+                        <span className="body-sm pc-checkbox__hint">
+                          reads every backup back and checks it against its checksums — a backup nobody has
+                          verified is one you&apos;re hoping about
+                        </span>
+                      </span>
+                    </label>
+                    <label className="pc-checkbox">
+                      <input
+                        type="checkbox"
+                        checked={backups.encrypt}
+                        onChange={(e) => setBackup({ encrypt: e.target.checked })}
+                      />
+                      <span className="pc-checkbox__box" />
+                      <span>
+                        <span className="code pc-checkbox__label">encrypt backups</span>
+                        <span className="body-sm pc-checkbox__hint">
+                          encrypted on each node before it leaves — the backup server only ever sees ciphertext
+                        </span>
+                      </span>
+                    </label>
+                    <label className="pc-checkbox">
+                      <input
+                        type="checkbox"
+                        checked={backups.offsite}
+                        onChange={(e) => setBackup({ offsite: e.target.checked })}
+                      />
+                      <span className="pc-checkbox__box" />
+                      <span>
+                        <span className="code pc-checkbox__label">sync to an off-site pbs</span>
+                        <span className="body-sm pc-checkbox__hint">
+                          a second pbs somewhere else pulls a copy of the datastore — the off-site copy of the 3-2-1
+                          rule
+                        </span>
+                      </span>
+                    </label>
+                    {backups.offsite && (
+                      <CheckedTextField
+                        id="offsite-address"
+                        label="off-site pbs address"
+                        hint="the second backup server, somewhere this cluster isn't"
+                        placeholder="pbs.offsite.example"
+                        value={backups.offsiteAddress}
+                        validate={validateHostAddress}
+                        onChange={(offsiteAddress) => setBackup({ offsiteAddress })}
+                      />
+                    )}
+                  </div>
+                )}
+
+                {backupHints
+                  .filter((hint): hint is Hint => hint !== null)
+                  .map((hint, i) => (
+                    <div key={i} className={`pc-callout pc-callout--${hint.tone}`}>
+                      <span className="code pc-callout__glyph">{hint.glyph}</span>
+                      <div className="pc-callout__body">
+                        <p className="body-sm pc-callout__text">{hint.text}</p>
+                      </div>
+                    </div>
+                  ))}
+              </div>
+
+              {revealErrors && <ProblemList problems={blocking} step={currentStep} />}
+              <div className="pc-stepflow__nav">
+                <button type="button" className="pc-btn" onClick={() => setCurrentStep("storage")}>
+                  <span className="pc-btn__bracket">[</span>
+                  back
+                  <span className="pc-btn__bracket">]</span>
+                </button>
+                <button type="button" className="pc-btn pc-btn--primary" onClick={() => tryPreview("backups")}>
+                  <span className="pc-btn__bracket">[</span>
+                  preview
+                  <span className="pc-btn__bracket">]</span>
+                </button>
+              </div>
+            </div>
+          )}
           </RevealErrorsContext.Provider>
 
           <p className="meta mt-3 text-ink-muted">
-            steps 4–5 — backups, install software — aren&apos;t built yet.
+            step 5 — install software — isn&apos;t built yet.
           </p>
         </div>
       </main>

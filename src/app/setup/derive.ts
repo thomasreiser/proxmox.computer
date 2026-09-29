@@ -11,6 +11,8 @@ import {
   bridgeCountFor,
   bridgeKey,
   interfacesFor,
+  isStorageLink,
+  isStoragePurpose,
   needsHostIpForPurposes,
   type AdditionalDisk,
   type BondConfig,
@@ -168,7 +170,10 @@ export function collectNodeNames(node: NodeInfo): NodeNames {
   const interfaces: string[] = [];
   for (const n of node.nics) if (n.name) interfaces.push(n.name);
   for (const b of node.network.bonds) if (b.name) interfaces.push(b.name);
-  for (const b of Object.values(node.network.bridges)) if (b.name) interfaces.push(b.name);
+  for (const [key, b] of Object.entries(node.network.bridges)) {
+    // a storage link has no bridge, so its kept name claims nothing
+    if (b.name && !isStorageLink(node.network, key)) interfaces.push(b.name);
+  }
 
   return { disks, interfaces };
 }
@@ -195,6 +200,10 @@ export function defaultHardware(): HardwareSpec {
 
 // Rough per-node defaults, derived from the global cidr — starts at .11
 // so .1-.10 stay free for the gateway and other fixed infra.
+// A static ip carries its network's prefix: 10.0.10.11/24 is "this node is
+// .11, and 10.0.10.0/24 is on its link" — how proxmox and
+// /etc/network/interfaces write an interface address. /32 would leave the
+// node alone on its link, with no route to its gateway or its peers.
 export function deriveNodeCidr(globalCidr: string, nodeIndex: number): string {
   const [ip, prefix] = globalCidr.split("/");
   const octets = parseIpv4(ip ?? "");
@@ -209,6 +218,15 @@ export function deriveGateway(globalCidr: string): string {
   if (!octets) return "";
   octets[3] = 1;
   return octets.join(".");
+}
+
+/**
+ * The dns server after the gateway moves: most homelab routers answer dns
+ * too, so it follows the gateway — until the visitor sets one of their
+ * own, which is left alone.
+ */
+export function followGateway(dns: string, previousGateway: string, nextGateway: string): string {
+  return dns === "" || dns === previousGateway ? nextGateway : dns;
 }
 
 // example placeholder text for a secondary bridge's network field — same
@@ -573,6 +591,51 @@ export function resizeArray<T>(arr: T[], length: number, make: (i: number) => T)
   return [...arr, ...Array.from({ length: length - arr.length }, (_, i) => make(arr.length + i))];
 }
 
+/**
+ * A node with the template's hardware — what "identical hardware" applies.
+ * Its network is resynced to the template's nic count; its name and
+ * addresses stay its own.
+ */
+export function withHardwareOf(node: NodeInfo, template: HardwareSpec): NodeInfo {
+  return {
+    ...node,
+    cpuVendor: template.cpuVendor,
+    cpuFamily: template.cpuFamily,
+    cpuCount: template.cpuCount,
+    coresPerCpu: template.coresPerCpu,
+    ramGb: template.ramGb,
+    bootDiskType: template.bootDiskType,
+    bootDiskSizeGb: template.bootDiskSizeGb,
+    bootDiskName: template.bootDiskName,
+    additionalDiskCount: template.additionalDiskCount,
+    additionalDisks: template.additionalDisks.map((d) => ({ ...d })),
+    nicCount: template.nicCount,
+    nics: template.nics.map((n) => ({ ...n })),
+    network: resyncNetworkForNics(node.network, template.nics.length),
+  };
+}
+
+/**
+ * The node list at a new length. A node added while hardware or network
+ * is shared across nodes starts as a copy of node 1's, not as a default:
+ * under "identical" there's no per-node form to fill its blanks in, so a
+ * default node would block the step with fields nobody can see.
+ */
+export function resizeNodes(
+  nodes: NodeInfo[],
+  length: number,
+  globalCidr: string,
+  shared: { hardware: boolean; network: boolean },
+): NodeInfo[] {
+  const next = resizeArray(nodes, length, (i) => defaultNode(i, globalCidr));
+  if (next.length <= nodes.length || nodes.length === 0) return next;
+  const template = nodes[0];
+  let added = next.slice(nodes.length);
+  if (shared.hardware) added = added.map((node) => withHardwareOf(node, template));
+  if (shared.network) added = applyNetworkStructure(added, template.network);
+  return [...nodes, ...added];
+}
+
 // Keep a node's network config consistent after its nic count, bonds, or
 // management interface change — drop bond members that no longer exist,
 // reclamp the management interface, and regenerate bridge defaults for
@@ -699,11 +762,47 @@ export function nextVmbrName(bridges: Record<string, BridgeConfig>): string {
   return `vmbr${n}`;
 }
 
-// ceph and zfs replication want a bond entirely to themselves — the same
-// reasoning purposeComboHint already warns about for a single shared
-// bridge, just enforced structurally: a bond assigned to either forbids
-// splitting it into extra vlan-tagged bridges at all, rather than merely
-// warning once one's added.
-export function isDedicatedStorageBondPurpose(purposes: InterfacePurpose[]): boolean {
-  return purposes.includes("ceph") || purposes.includes("zfs");
+/**
+ * Holds a node's network to the storage-link rules (see isStorageLink):
+ * ceph and zfs live only on an interface's native slot, a storage link
+ * carries nothing but storage traffic, and it has no extra vlan-tagged
+ * bridges, since there's no bridge to tag. Run after every bridge edit.
+ * Returns the same object when nothing had to change.
+ */
+export function enforceStorageLinks(network: NodeNetwork): NodeNetwork {
+  let bridges = network.bridges;
+  let bridgeCounts = network.bridgeCounts;
+  const patchBridge = (key: string, bridge: BridgeConfig) => {
+    if (bridges === network.bridges) bridges = { ...bridges };
+    bridges[key] = bridge;
+  };
+
+  for (const [key, bridge] of Object.entries(network.bridges)) {
+    const [interfaceId, index] = key.split("#");
+    if (!bridge.purposes.some(isStoragePurpose)) continue;
+    // an extra bridge is a bridge — storage traffic doesn't ride one
+    if (index !== "0") {
+      const rest = bridge.purposes.filter((p) => !isStoragePurpose(p));
+      patchBridge(key, { ...bridge, purposes: rest.length > 0 ? rest : ["vm"] });
+      continue;
+    }
+    if (interfaceId === network.managementInterfaceId) continue;
+    // storage mixed with bridge purposes: keep the bridge, the guests on
+    // it are the harder thing to lose
+    const rest = bridge.purposes.filter((p) => !isStoragePurpose(p));
+    if (rest.length > 0) {
+      patchBridge(key, { ...bridge, purposes: rest });
+      continue;
+    }
+    // a storage link: the interface is its alone
+    const count = bridgeCountFor(network.bridgeCounts, interfaceId);
+    if (count > 1) {
+      if (bridgeCounts === network.bridgeCounts) bridgeCounts = { ...bridgeCounts };
+      bridgeCounts[interfaceId] = "1";
+      if (bridges === network.bridges) bridges = { ...bridges };
+      for (let idx = 1; idx < count; idx++) delete bridges[bridgeKey(interfaceId, idx)];
+    }
+  }
+  if (bridges === network.bridges && bridgeCounts === network.bridgeCounts) return network;
+  return { ...network, bridges, bridgeCounts };
 }

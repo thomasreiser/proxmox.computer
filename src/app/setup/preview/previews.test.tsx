@@ -1,5 +1,5 @@
 /**
- * Integration tests for the three preview routes. Each renders the real
+ * Integration tests for the four preview routes. Each renders the real
  * page from a saved state — the way a visitor arrives from the wizard —
  * and checks what's drawn and where "next" hands off to.
  *
@@ -13,8 +13,9 @@ import userEvent from "@testing-library/user-event";
 import HardwarePreview from "./hardware/page";
 import NetworkPreview from "./network/page";
 import StoragePreview from "./storage/page";
+import BackupsPreview from "./backups/page";
 import { STORAGE_KEY, loadPersistedState, type PersistedState } from "../wizard-state";
-import { bond, bridge, cluster, disks, network, nics, persistedState } from "../test-fixtures";
+import { backupPlan, bond, bridge, cluster, disks, network, nics, persistedState } from "../test-fixtures";
 import { router } from "@/test/router";
 
 function save(state: PersistedState) {
@@ -47,6 +48,7 @@ describe.each([
   ["hardware", HardwarePreview],
   ["network", NetworkPreview],
   ["storage", StoragePreview],
+  ["backups", BackupsPreview],
 ] as const)("%s preview with nothing saved", (_name, Preview) => {
   it("offers a way back to step 1 instead of an empty diagram", async () => {
     render(<Preview />);
@@ -128,6 +130,33 @@ describe("network preview", () => {
     expect(summaryValue(/^bonds$/i)).toBe("2");
   });
 
+  // an lacp bond stays down until the switch groups its ports into a lag
+  it("says which ports the switch has to group into a lag", async () => {
+    const nodes = cluster(2, {
+      nics: nics("1gbe", "10gbe", "10gbe"),
+      network: network({
+        bondCount: "1",
+        bonds: [bond({ name: "bond1", mode: "lacp", nicIndices: [1, 2] })],
+        bridgeCounts: { "nic-0": "1", "bond-0": "1" },
+        bridges: { "nic-0#0": bridge(), "bond-0#0": bridge({ purposes: ["ceph"], ip: "10.0.20.11/32" }) },
+      }),
+    });
+    save(persistedState({ currentStep: "network", nodes }));
+    render(<NetworkPreview />);
+    expect(await screen.findByText(/2 bonds need a lag on the switch/i)).toBeInTheDocument();
+    expect(document.querySelectorAll(".pc-laglist__item")).toHaveLength(2);
+    // two member ports on each of the two nodes
+    expect(screen.getAllByText("lacp bond1").filter((el) => el.classList.contains("pc-switch__portlag"))).toHaveLength(4);
+  });
+
+  it("asks for no lag when no bond needs one", async () => {
+    save(persistedState({ currentStep: "network" }));
+    render(<NetworkPreview />);
+    await screen.findByText("# step 2 of 5 — preview");
+    expect(screen.queryByText(/a lag on the switch/i)).not.toBeInTheDocument();
+    expect(document.querySelector(".pc-switch__portlag")).toBeNull();
+  });
+
   // the one physical-layout rule the diagram can state: every ceph port on
   // one switch
   it("counts the ceph links and says they belong on one switch", async () => {
@@ -193,6 +222,20 @@ describe("network preview", () => {
     const vlan = document.querySelector(".pc-switch__portvlan") as HTMLElement;
     expect(vlan).toHaveTextContent("u t?");
     expect(vlan).toHaveClass("pc-switch__portvlan--warn");
+  });
+
+  it("shows the dns server beside the gateway", async () => {
+    save(persistedState({ currentStep: "network", dns: "10.0.10.53" }));
+    render(<NetworkPreview />);
+    await screen.findByText("# step 2 of 5 — preview");
+    expect(summaryValue(/^dns server$/i)).toBe("10.0.10.53");
+  });
+
+  it("marks a ceph link as having no bridge", async () => {
+    save(persistedState({ currentStep: "network", nodes: cephCluster() }));
+    render(<NetworkPreview />);
+    await screen.findByText("# step 2 of 5 — preview");
+    expect(document.querySelectorAll(".pc-netcard__nobridge")).toHaveLength(3);
   });
 
   it("won't hand off while step 2 has problems", async () => {
@@ -319,10 +362,132 @@ describe("storage preview", () => {
     expect(summaryValue(/^local disks$/i)).toBe("3");
   });
 
-  // steps 4–5 don't exist yet, so there's nowhere to hand off to
-  it("keeps next disabled until step 4 exists", async () => {
+  it("won't hand off while step 3 has problems, and lists them", async () => {
+    const state = persistedState();
+    state.storage = { ...state.storage, ceph: { ...state.storage.ceph, poolName: "" } };
+    save({ ...state, nodes: cephCluster() });
+    render(<StoragePreview />);
+    expect(await screen.findByRole("button", { name: /next/i })).toBeDisabled();
+    expect(screen.getByRole("alert")).toHaveTextContent(/ceph pool name/i);
+  });
+
+  it("hands off to the backups step", async () => {
+    const user = userEvent.setup();
     save(persistedState());
     render(<StoragePreview />);
+    await user.click(await screen.findByRole("button", { name: /next/i }));
+    expect(loadPersistedState()?.currentStep).toBe("backups");
+    expect(router.push).toHaveBeenCalledWith("/setup");
+  });
+});
+
+describe("backups preview", () => {
+  it("cables every node to the backup server", async () => {
+    save(persistedState({ currentStep: "backups" }));
+    render(<BackupsPreview />);
+    expect(await screen.findByText("# step 4 of 5 — preview")).toBeInTheDocument();
+    expect(summaryValue(/^kept per guest$/i)).toBe("20");
+    expect(summaryValue(/^reaches back$/i)).toBe("about 6 months");
+    const target = document.querySelector(".pc-pool--backup") as HTMLElement;
+    expect(within(target).getByText("10.0.10.50")).toBeInTheDocument();
+    expect(within(target).getByText("daily at 02:00")).toBeInTheDocument();
+    expect(document.querySelectorAll(".pc-storcard")).toHaveLength(3);
+  });
+
+  it("shows the speed of each node's backup link", async () => {
+    save(persistedState({ currentStep: "backups", nodes: cluster(3, { nics: nics("2.5gbe", "1gbe") }) }));
+    render(<BackupsPreview />);
+    await screen.findByText("# step 4 of 5 — preview");
+    // no backup bridge: the management link's nic
+    expect(screen.getAllByText("2.5 gbe")).toHaveLength(3);
+  });
+
+  // steps 1–4 are an installable setup; step 5 is optional
+  it("offers installing now or going on to the optional software step", async () => {
+    save(persistedState({ currentStep: "backups" }));
+    render(<BackupsPreview />);
+    expect(await screen.findByText("ready to install — or keep going")).toBeInTheDocument();
+    expect(screen.getByText(/that step is optional/i)).toBeInTheDocument();
+  });
+
+  it("says which nodes share the management link", async () => {
+    save(persistedState({ currentStep: "backups" }));
+    render(<BackupsPreview />);
+    expect(await screen.findByText(/every node send backups over the management link/i)).toBeInTheDocument();
+    expect(screen.getAllByText("management link")).toHaveLength(3);
+  });
+
+  it("names a node's backup bridge", async () => {
+    const nodes = cluster(1, {
+      network: network({
+        bridgeCounts: { "nic-0": "1", "nic-1": "1" },
+        bridges: {
+          "nic-0#0": bridge({ name: "vmbr0" }),
+          "nic-1#0": bridge({ name: "vmbr7", purposes: ["backup"], ip: "10.0.30.11/24" }),
+        },
+      }),
+    });
+    save(persistedState({ currentStep: "backups", nodeCount: "1", nodes }));
+    render(<BackupsPreview />);
+    expect(await screen.findByText("vmbr7")).toBeInTheDocument();
+    expect(screen.queryByText(/over the management link/i)).not.toBeInTheDocument();
+  });
+
+  it("draws the off-site copy when pbs syncs one", async () => {
+    save(persistedState({ currentStep: "backups", backups: backupPlan({ offsite: true, offsiteAddress: "far.example" }) }));
+    render(<BackupsPreview />);
+    expect(await screen.findByText("far.example")).toBeInTheDocument();
+    expect(summaryValue(/^off-site$/i)).toBe("yes");
+  });
+
+  it("warns on a pbs vm without an off-site copy", async () => {
+    save(persistedState({ currentStep: "backups", backups: backupPlan({ target: "pbs-vm" }) }));
+    render(<BackupsPreview />);
+    expect(await screen.findByText(/lives on the cluster it backs up/i)).toBeInTheDocument();
+  });
+
+  it("draws no target and says why with no backups", async () => {
+    save(persistedState({ currentStep: "backups", backups: backupPlan({ target: "none" }) }));
+    render(<BackupsPreview />);
+    expect(await screen.findByText(/no backups — nothing to cable/i)).toBeInTheDocument();
+    expect(document.querySelector(".pc-pool--backup")).toBeNull();
+    expect(summaryValue(/^target$/i)).toBe("none");
+  });
+
+  it("lists what step 4 still needs", async () => {
+    save(persistedState({ currentStep: "backups", backups: backupPlan({ pbsAddress: "" }) }));
+    render(<BackupsPreview />);
+    expect(await screen.findByRole("alert")).toHaveTextContent(/pbs address/i);
+  });
+
+  it("offers each node's answer file as a toml download", async () => {
+    save(persistedState({ currentStep: "backups", hostnameSuffix: "lab.lan" }));
+    render(<BackupsPreview />);
+    const links = await screen.findAllByRole("link", { name: /^\[\s*answer-.*\.toml\s*\]$/ });
+    expect(links.map((l) => l.getAttribute("download"))).toEqual([
+      "answer-pve01.toml",
+      "answer-pve02.toml",
+      "answer-pve03.toml",
+    ]);
+    const href = links[1].getAttribute("href") ?? "";
+    expect(href.startsWith("data:application/toml")).toBe(true);
+    const toml = decodeURIComponent(href.slice(href.indexOf(",") + 1));
+    expect(toml).toContain('fqdn = "pve02.lab.lan"');
+    expect(toml).toContain("disk-list = [\"CHANGE-ME\"]");
+  });
+
+  it("holds the answer files back while a step has problems", async () => {
+    save(persistedState({ currentStep: "backups", backups: backupPlan({ pbsAddress: "" }) }));
+    render(<BackupsPreview />);
+    expect(await screen.findByText(/fix the problems listed below first/i)).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /answer-.*\.toml/ })).not.toBeInTheDocument();
+    for (const button of screen.getAllByRole("button", { name: /answer-.*\.toml/ })) expect(button).toBeDisabled();
+  });
+
+  // step 5 doesn't exist yet, so there's nowhere to hand off to
+  it("keeps next disabled until step 5 exists", async () => {
+    save(persistedState({ currentStep: "backups" }));
+    render(<BackupsPreview />);
     expect(await screen.findByRole("button", { name: /next/i })).toBeDisabled();
   });
 });

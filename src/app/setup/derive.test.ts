@@ -17,7 +17,10 @@ import {
   deriveNodeCidr,
   effectiveClusterStorage,
   interfaceIdsFor,
-  isDedicatedStorageBondPurpose,
+  enforceStorageLinks,
+  followGateway,
+  resizeNodes,
+  withHardwareOf,
   maxBondsForCluster,
   minAdditionalDisks,
   nextFreeHostInNetwork,
@@ -142,12 +145,25 @@ describe("collectNodeNames", () => {
     expect(names.disks).toEqual(["boot", "ceph"]);
     expect(names.interfaces).toEqual(expect.arrayContaining(["ceph", "bond0", "vmbr0"]));
   });
+
+  // a storage link keeps its old bridge name for switching back, but has
+  // no bridge — the name mustn't block a real bridge from using it
+  it("doesn't count a storage link's kept bridge name", () => {
+    const n = node({
+      network: network({
+        bridges: { "nic-0#0": bridge({ name: "vmbr0" }), "nic-1#0": bridge({ name: "vmbr1", purposes: ["ceph"] }) },
+      }),
+    });
+    expect(collectNodeNames(n).interfaces).not.toContain("vmbr1");
+  });
 });
 
 describe("address derivation", () => {
   it("numbers nodes from .11 on the global subnet", () => {
+    // a static ip carries its network's prefix — /32 would cut it off
     expect(deriveNodeCidr("10.0.0.0/24", 0)).toBe("10.0.0.11/24");
     expect(deriveNodeCidr("10.0.0.0/24", 2)).toBe("10.0.0.13/24");
+    expect(deriveNodeCidr("172.16.0.0/16", 0)).toBe("172.16.0.11/16");
   });
 
   it("suggests .1 on the global subnet as the gateway", () => {
@@ -469,10 +485,59 @@ describe("defaults", () => {
     expect(hw.additionalDisks).toHaveLength(Number(hw.additionalDiskCount));
   });
 
-  it("treats ceph and zfs as bonds that want the whole interface", () => {
-    expect(isDedicatedStorageBondPurpose(["ceph"])).toBe(true);
-    expect(isDedicatedStorageBondPurpose(["zfs"])).toBe(true);
-    expect(isDedicatedStorageBondPurpose(["vm", "cluster"])).toBe(false);
+});
+
+describe("enforceStorageLinks", () => {
+  // nic-0 is management; nic-1 is where the storage link goes
+  const net = (bridges: NonNullable<Parameters<typeof network>[0]>["bridges"], bridgeCounts: Record<string, string> = {}) =>
+    network({ bridgeCounts: { "nic-0": "1", "nic-1": "1", ...bridgeCounts }, bridges });
+
+  it("leaves a valid network alone — the same object", () => {
+    const n = net({ "nic-0#0": bridge({ name: "vmbr0" }), "nic-1#0": bridge({ name: "vmbr1", purposes: ["ceph"] }) });
+    expect(enforceStorageLinks(n)).toBe(n);
+  });
+
+  // a storage link takes the whole interface, so there's nothing to tag
+  it("drops the extra bridges of an interface that became a storage link", () => {
+    const n = net(
+      {
+        "nic-0#0": bridge({ name: "vmbr0" }),
+        "nic-1#0": bridge({ name: "vmbr1", purposes: ["zfs"] }),
+        "nic-1#1": bridge({ name: "vmbr2", vlanTag: "20" }),
+      },
+      { "nic-1": "2" },
+    );
+    const out = enforceStorageLinks(n);
+    expect(out.bridgeCounts["nic-1"]).toBe("1");
+    expect(out.bridges["nic-1#1"]).toBeUndefined();
+    expect(out.bridges["nic-1#0"].purposes).toEqual(["zfs"]);
+  });
+
+  it("strips storage from an extra bridge, which stays a vm bridge", () => {
+    const n = net(
+      {
+        "nic-0#0": bridge({ name: "vmbr0" }),
+        "nic-1#0": bridge({ name: "vmbr1" }),
+        "nic-1#1": bridge({ name: "vmbr2", purposes: ["ceph"], vlanTag: "20" }),
+        "nic-1#2": bridge({ name: "vmbr3", purposes: ["zfs", "backup"], vlanTag: "30" }),
+      },
+      { "nic-1": "3" },
+    );
+    const out = enforceStorageLinks(n);
+    expect(out.bridges["nic-1#1"].purposes).toEqual(["vm"]);
+    expect(out.bridges["nic-1#2"].purposes).toEqual(["backup"]);
+  });
+
+  // mixing can't be picked in the form; if a state has it, the bridge wins
+  it("keeps the bridge when storage is mixed with bridge purposes", () => {
+    const n = net({ "nic-0#0": bridge({ name: "vmbr0" }), "nic-1#0": bridge({ purposes: ["ceph", "vm"] }) });
+    expect(enforceStorageLinks(n).bridges["nic-1#0"].purposes).toEqual(["vm"]);
+  });
+
+  // the management bridge exists for the web ui anyway — storage may share it
+  it("lets the management bridge carry storage alongside everything else", () => {
+    const n = net({ "nic-0#0": bridge({ name: "vmbr0", purposes: ["vm", "ceph"] }), "nic-1#0": bridge({ name: "vmbr1" }) });
+    expect(enforceStorageLinks(n)).toBe(n);
   });
 });
 
@@ -495,5 +560,70 @@ describe("placeholder fallbacks when everything is taken", () => {
 
   it("skips reserved hosts and the network address itself", () => {
     expect(nextFreeHostInNetwork("10.0.20.0", new Set(["10.0.20.1", "10.0.20.2"]))).toBe("10.0.20.3");
+  });
+});
+
+describe("withHardwareOf", () => {
+  it("copies every hardware spec, keeping the node's own name and addresses", () => {
+    const template = node({ ramGb: "128", cpuFamily: "Skylake-Server", bootDiskSizeGb: "1024", additionalDisks: disks(2000) });
+    const own = node({ name: "pve07", network: network({ hostLabel: "pve07", cidr: "10.0.0.17/24" }) });
+    const out = withHardwareOf(own, template);
+    expect(out).toMatchObject({ name: "pve07", ramGb: "128", cpuFamily: "Skylake-Server", bootDiskSizeGb: "1024" });
+    expect(out.additionalDisks).toEqual(template.additionalDisks);
+    expect(out.additionalDisks).not.toBe(template.additionalDisks);
+    expect(out.network.cidr).toBe("10.0.0.17/24");
+  });
+});
+
+describe("resizeNodes", () => {
+  const shared = (hardware: boolean, network: boolean) => ({ hardware, network });
+  const two = () => cluster(2, { ramGb: "64", bootDiskSizeGb: "512", cpuFamily: "Skylake-Server" });
+
+  // regression: an added node came with default hardware under "identical"
+  it("gives an added node node 1's hardware when hardware is shared", () => {
+    const out = resizeNodes(two(), 3, "10.0.0.0/24", shared(true, false));
+    expect(out[2]).toMatchObject({ name: "pve03", ramGb: "64", bootDiskSizeGb: "512", cpuFamily: "Skylake-Server" });
+  });
+
+  it("adds a default node when nothing is shared", () => {
+    const out = resizeNodes(two(), 3, "10.0.0.0/24", shared(false, false));
+    expect(out[2].ramGb).toBe("");
+  });
+
+  it("gives an added node node 1's network structure when network is shared", () => {
+    const nodes = two();
+    nodes[0].network = { ...nodes[0].network, managementInterfaceId: "nic-1" };
+    const out = resizeNodes(nodes, 3, "10.0.0.0/24", shared(false, true));
+    expect(out[2].network.managementInterfaceId).toBe("nic-1");
+    // its own identity, not node 1's
+    expect(out[2].network.hostLabel).toBe("pve03");
+  });
+
+  it("leaves the existing nodes untouched", () => {
+    const nodes = two();
+    const out = resizeNodes(nodes, 4, "10.0.0.0/24", shared(true, true));
+    expect(out[0]).toBe(nodes[0]);
+    expect(out[1]).toBe(nodes[1]);
+  });
+
+  it("shrinks and keeps the same length as before", () => {
+    const nodes = two();
+    expect(resizeNodes(nodes, 1, "10.0.0.0/24", shared(true, true))).toEqual([nodes[0]]);
+    expect(resizeNodes(nodes, 2, "10.0.0.0/24", shared(true, true))).toBe(nodes);
+  });
+});
+
+describe("followGateway", () => {
+  it("moves a dns server that was the gateway along with it", () => {
+    expect(followGateway("10.0.10.1", "10.0.10.1", "10.0.20.1")).toBe("10.0.20.1");
+  });
+
+  it("fills in a blank dns server", () => {
+    expect(followGateway("", "10.0.10.1", "10.0.20.1")).toBe("10.0.20.1");
+  });
+
+  // the visitor's own resolver stays put
+  it("leaves a dns server of their own alone", () => {
+    expect(followGateway("1.1.1.1", "10.0.10.1", "10.0.20.1")).toBe("1.1.1.1");
   });
 });

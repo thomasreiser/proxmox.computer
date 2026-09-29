@@ -205,3 +205,18 @@ export async function chooseClusterStorage(user: User, want: { ceph: boolean; zf
     if (storageCheckbox(mode).checked !== want[mode]) await user.click(storageCheckbox(mode));
   }
 }
+
+/**
+ * Renders the wizard on step 4 the long way: through steps 1–3 and each
+ * hand-off, as a visitor would. Slow — most step 4 tests restore a
+ * complete save at step 4 instead; this one proves the path exists.
+ */
+export async function renderAtBackupsStep() {
+  const user = await renderAtStorageStep();
+  await waitForSave(() => true);
+  persistCurrentStep("backups");
+  cleanup();
+  render(<Setup />);
+  expect(await screen.findByRole("heading", { name: "backups" })).toBeInTheDocument();
+  return user;
+}

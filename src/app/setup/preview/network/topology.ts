@@ -5,9 +5,12 @@
 
 import {
   bondModeLabel,
+  type BondMode,
   bridgeCountFor,
   bridgeKey,
+  interfaceNameFor,
   interfacesFor,
+  isStorageLink,
   needsHostIpForPurposes,
   effectivePort,
   nicIndicesForInterface,
@@ -49,7 +52,11 @@ export interface BridgeAddress {
 }
 
 export interface BridgeSummary {
+  // the bridge's name — or, for a storage link, the nic or bond's own
   name: string;
+  // ceph/zfs off the management interface: the address sits on the nic
+  // or bond itself, with no bridge (see isStorageLink)
+  storageLink: boolean;
   vlan: BridgeVlan;
   purposes: InterfacePurpose[];
   address: BridgeAddress;
@@ -58,7 +65,8 @@ export interface BridgeSummary {
 export interface InterfaceTopology {
   id: string; // "nic-<i>" or "bond-<i>", matches interfacesFor's ids
   nicIndices: number[];
-  bond: { name: string; modeLabel: string } | null;
+  // lag: what the bond's member ports need on the switch side (see switchLagFor)
+  bond: { name: string; modeLabel: string; lag: SwitchLag | null } | null;
   // a css color() value — a distinct hue per bond so its member cables
   // (and this card's header) visibly match; the neutral border color for
   // a plain, unbonded nic.
@@ -226,13 +234,22 @@ export function buildClusterTopology(nodes: NodeInfo[], ctx: ClusterContext): No
                 kind: needsHostIpForPurposes(bridge.purposes, bridge.otherNeedsHostIp) ? "host" : "network",
                 cidr: bridge.ip,
               };
-        bridges.push({ name: bridge.name, vlan, purposes: bridge.purposes, address });
+        const storageLink = isStorageLink(node.network, bridgeKey(ref.id, idx));
+        bridges.push({
+          name: storageLink ? interfaceNameFor(ref.id, node.nics, node.network.bonds) : bridge.name,
+          storageLink,
+          vlan,
+          purposes: bridge.purposes,
+          address,
+        });
       }
 
       return {
         id: ref.id,
         nicIndices,
-        bond: bondConfig ? { name: bondConfig.name, modeLabel: bondModeLabel(bondConfig.mode) } : null,
+        bond: bondConfig
+          ? { name: bondConfig.name, modeLabel: bondModeLabel(bondConfig.mode), lag: switchLagFor(bondConfig.mode) }
+          : null,
         colorVar,
         bridges,
         isManagement,
@@ -284,6 +301,48 @@ export function buildClusterTopology(nodes: NodeInfo[], ctx: ClusterContext): No
 // how many physical links in the whole cluster carry ceph — drives both
 // the summary strip and whether the "keep these on one switch" note is
 // worth showing at all.
+/**
+ * What a bond's member ports need on the switch. lacp only comes up once
+ * the switch groups those ports into an 802.3ad lag; balance-rr needs a
+ * static lag (a port-channel with no negotiation). active-backup and
+ * balance-alb work on plain ports — nothing to configure.
+ */
+export type SwitchLag = "lacp" | "static";
+
+export function switchLagFor(mode: BondMode): SwitchLag | null {
+  if (mode === "lacp") return "lacp";
+  if (mode === "balance-rr") return "static";
+  return null;
+}
+
+/** the short tag under a switch port: "lacp bond1", "static bond0", or "" */
+export function portLagLabel(iface: InterfaceTopology): string {
+  if (!iface.bond?.lag) return "";
+  return `${iface.bond.lag} ${iface.bond.name}`;
+}
+
+export interface LagGroup {
+  fqdn: string;
+  bondName: string;
+  lag: SwitchLag;
+  // the nic names cabled into the switch ports that form this lag
+  ports: string[];
+}
+
+/** every port group the switch has to be configured as one lag, in node order */
+export function lagGroups(topologies: NodeTopology[]): LagGroup[] {
+  return topologies.flatMap((t) =>
+    t.interfaces
+      .filter((iface) => iface.bond?.lag)
+      .map((iface) => ({
+        fqdn: t.fqdn,
+        bondName: iface.bond!.name,
+        lag: iface.bond!.lag!,
+        ports: iface.nicIndices.map((i) => t.node.nics[i]?.name ?? `nic ${i + 1}`),
+      })),
+  );
+}
+
 export function cephCableCount(topologies: NodeTopology[]): number {
   return topologies.reduce((n, t) => n + t.cables.filter((c) => c.iface.carriesCeph).length, 0);
 }

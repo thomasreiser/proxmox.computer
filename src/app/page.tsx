@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { OpenSetupButton } from "./open-setup";
 import wizardSteps from "@/data/wizard-steps.json";
 
 const topics = [
@@ -55,6 +56,7 @@ export default function Home() {
                 start the setup
                 <span className="pc-btn__bracket">]</span>
               </Link>
+              <OpenSetupButton />
               <Link href="/how-it-works" className="pc-btn pc-btn--ghost">
                 see how it works →
               </Link>

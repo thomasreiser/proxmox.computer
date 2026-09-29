@@ -5,6 +5,9 @@ import {
   buildClusterTopology,
   cephCableCount,
   distinctVlanTags,
+  lagGroups,
+  portLagLabel,
+  switchLagFor,
   portVlanDescription,
   portVlanLabel,
   vlanLabel,
@@ -70,6 +73,27 @@ describe("bridge addressing", () => {
     });
     const iface = buildClusterTopology(nodes, ctx)[0].interfaces.find((i) => i.id === "nic-1");
     expect(iface?.bridges[0].address).toEqual({ kind: "host", cidr: "10.0.20.11/24" });
+  });
+
+  // ceph/zfs off management have no bridge: the address is the nic's own
+  it("draws a storage link under its nic's name, not a bridge", () => {
+    const n = nics("1gbe", "10gbe");
+    n[1].name = "storage";
+    const nodes = cluster(1, {
+      nics: n,
+      network: network({
+        bridgeCounts: { "nic-0": "1", "nic-1": "1" },
+        bridges: { "nic-0#0": bridge({ name: "vmbr0" }), "nic-1#0": bridge({ name: "vmbr1", purposes: ["ceph"] }) },
+      }),
+    });
+    const [mgmt, storage] = buildClusterTopology(nodes, ctx)[0].interfaces;
+    expect(storage.bridges[0]).toMatchObject({ name: "storage", storageLink: true });
+    expect(mgmt.bridges[0]).toMatchObject({ name: "vmbr0", storageLink: false });
+  });
+
+  it("keeps the management bridge a bridge even when it carries ceph", () => {
+    const nodes = cluster(1, { network: network({ bridges: { "nic-0#0": bridge({ name: "vmbr0", purposes: ["vm", "ceph"] }) } }) });
+    expect(buildClusterTopology(nodes, ctx)[0].interfaces[0].bridges[0].storageLink).toBe(false);
   });
 
   // drawing a served subnet as if it were the node's own address would be
@@ -246,5 +270,61 @@ describe("switch port labels", () => {
     const nodes = cluster(1, { nics: nics({ speed: "10gbe" }, { speed: "10gbe", port: "rj45" }, "other") });
     const ports = buildClusterTopology(nodes, ctx)[0].cables.map((c) => c.nicPort);
     expect(ports).toEqual(["sfp+", "rj45", null]);
+  });
+});
+
+describe("switch lags", () => {
+  it("knows which bond modes need the switch's help", () => {
+    expect(switchLagFor("lacp")).toBe("lacp");
+    expect(switchLagFor("balance-rr")).toBe("static");
+    expect(switchLagFor("active-backup")).toBeNull();
+    expect(switchLagFor("balance-alb")).toBeNull();
+  });
+
+  // two lacp bonds on one node, like a management bond plus a ceph bond
+  const twoLacpBonds = () => {
+    const n = nics("2.5gbe", "2.5gbe", "10gbe", "10gbe");
+    ["proxmox-1", "proxmox-2", "ceph-1", "ceph-2"].forEach((name, i) => (n[i].name = name));
+    return cluster(1, {
+      nics: n,
+      network: network({
+        bondCount: "2",
+        bonds: [
+          bond({ name: "bond0", mode: "lacp", nicIndices: [0, 1] }),
+          bond({ name: "bond1", mode: "lacp", nicIndices: [2, 3] }),
+        ],
+        managementInterfaceId: "bond-0",
+        bridgeCounts: { "bond-0": "1", "bond-1": "1" },
+        bridges: { "bond-0#0": bridge({ name: "vmbr0" }), "bond-1#0": bridge({ purposes: ["ceph"] }) },
+      }),
+    });
+  };
+
+  it("lists every bond whose ports form a lag, with its ports", () => {
+    expect(lagGroups(buildClusterTopology(twoLacpBonds(), ctx))).toEqual([
+      { fqdn: "pve01.lab.lan", bondName: "bond0", lag: "lacp", ports: ["proxmox-1", "proxmox-2"] },
+      { fqdn: "pve01.lab.lan", bondName: "bond1", lag: "lacp", ports: ["ceph-1", "ceph-2"] },
+    ]);
+  });
+
+  it("tags each member port with its lag", () => {
+    const [bond0, bond1] = buildClusterTopology(twoLacpBonds(), ctx)[0].interfaces;
+    expect(portLagLabel(bond0)).toBe("lacp bond0");
+    expect(portLagLabel(bond1)).toBe("lacp bond1");
+  });
+
+  it("asks nothing of the switch for an active-backup bond or a plain nic", () => {
+    const nodes = cluster(1, {
+      nics: nics("1gbe", "1gbe", "1gbe"),
+      network: network({
+        bondCount: "1",
+        bonds: [bond({ nicIndices: [1, 2] })],
+        bridgeCounts: { "nic-0": "1", "bond-0": "1" },
+        bridges: { "nic-0#0": bridge(), "bond-0#0": bridge({ name: "vmbr1" }) },
+      }),
+    });
+    const topology = buildClusterTopology(nodes, ctx);
+    expect(lagGroups(topology)).toEqual([]);
+    expect(topology[0].interfaces.map(portLagLabel)).toEqual(["", ""]);
   });
 });

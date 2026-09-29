@@ -10,7 +10,11 @@ import {
   effectivePort,
   interfacesFor,
   isFastNic,
+  interfaceNameFor,
   isPersistedState,
+  isStorageLink,
+  isStoragePurpose,
+  linkSpeedLabel,
   isSlowNic,
   loadPersistedState,
   needsHostIpForPurposes,
@@ -18,12 +22,14 @@ import {
   nicSpeedLabel,
   nicSpeedsForInterface,
   persistCurrentStep,
+  replacePersistedState,
   portChoices,
   portHint,
   validBonds,
   type PersistedState,
 } from "./wizard-state";
-import { bond, cluster, nics } from "./test-fixtures";
+import { bond, bridge, cluster, nics } from "./test-fixtures";
+import { defaultBackupPlan } from "./backups";
 import { defaultStoragePlan } from "./derive";
 
 function persisted(overrides: Partial<PersistedState> = {}): PersistedState {
@@ -34,12 +40,14 @@ function persisted(overrides: Partial<PersistedState> = {}): PersistedState {
     hostnameSuffix: "lab.lan",
     globalCidr: "10.0.0.0/24",
     gateway: "10.0.0.1",
+    dns: "10.0.0.1",
     homelabVlan: "",
     nodes: cluster(3),
     identicalHardware: true,
     identicalNetwork: false,
     clusterStorage: { ceph: true, zfs: false },
     storage: defaultStoragePlan(),
+    backups: defaultBackupPlan(),
     identicalStorage: false,
     ...overrides,
   };
@@ -246,13 +254,19 @@ describe("isPersistedState", () => {
   });
 
   it("accepts every step this build can reopen on", () => {
-    for (const step of ["hardware", "network", "storage"] as const) {
+    for (const step of ["hardware", "network", "storage", "backups"] as const) {
       expect(isPersistedState(persisted({ currentStep: step }))).toBe(true);
     }
   });
 
   it.each([
-    ["currentStep", "backups"],
+    ["currentStep", "install"],
+    ["dns", undefined],
+    ["dns", 53],
+    ["backups", null],
+    ["backups", { ...defaultBackupPlan(), target: "s3" }],
+    ["backups", { ...defaultBackupPlan(), keepDaily: 7 }],
+    ["backups", { ...defaultBackupPlan(), offsite: "no" }],
     ["nodeCount", 3],
     ["globalCidr", null],
     ["identicalNetwork", "yes"],
@@ -361,5 +375,70 @@ describe("when storage itself fails", () => {
     }
     // the save it couldn't update is left exactly as it was
     expect(loadPersistedState()?.currentStep).toBe("network");
+  });
+});
+
+describe("storage links", () => {
+  it("knows ceph and zfs are storage purposes", () => {
+    expect(isStoragePurpose("ceph")).toBe(true);
+    expect(isStoragePurpose("zfs")).toBe(true);
+    for (const p of ["vm", "backup", "cluster", "other"] as const) expect(isStoragePurpose(p)).toBe(false);
+  });
+
+  const net = (purposes: NonNullable<Parameters<typeof bridge>[0]>["purposes"], key = "nic-1#0") => ({
+    managementInterfaceId: "nic-0",
+    bridges: { "nic-0#0": bridge(), [key]: bridge({ purposes }) },
+  });
+
+  it("makes ceph or zfs off the management interface a storage link", () => {
+    expect(isStorageLink(net(["ceph"]), "nic-1#0")).toBe(true);
+    expect(isStorageLink(net(["zfs"]), "nic-1#0")).toBe(true);
+    expect(isStorageLink(net(["ceph"], "bond-0#0"), "bond-0#0")).toBe(true);
+  });
+
+  it("leaves bridges bridges", () => {
+    expect(isStorageLink(net(["vm", "backup"]), "nic-1#0")).toBe(false);
+    // the management interface keeps its bridge, storage or not
+    expect(isStorageLink({ managementInterfaceId: "nic-0", bridges: { "nic-0#0": bridge({ purposes: ["ceph"] }) } }, "nic-0#0")).toBe(false);
+    // only an interface's native slot can be one
+    expect(isStorageLink(net(["ceph"], "nic-1#1"), "nic-1#1")).toBe(false);
+    expect(isStorageLink(net(["ceph"]), "nic-2#0")).toBe(false);
+  });
+
+  it("names an interface by its bond or nic", () => {
+    const n = nics("10gbe", "10gbe");
+    n[1].name = "storage";
+    expect(interfaceNameFor("nic-1", n, [])).toBe("storage");
+    expect(interfaceNameFor("bond-0", n, [bond({ name: "bond7", nicIndices: [0, 1] })])).toBe("bond7");
+    // an id that no longer resolves falls back to itself
+    expect(interfaceNameFor("bond-3", n, [])).toBe("bond-3");
+  });
+});
+
+describe("replacePersistedState", () => {
+  it("saves a setup the wizard will load", () => {
+    const state = persisted({ currentStep: "storage" });
+    expect(replacePersistedState(state)).toBe(true);
+    expect(loadPersistedState()).toEqual(state);
+  });
+
+  it("reports storage being unavailable", () => {
+    const spy = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new Error("quota");
+    });
+    expect(replacePersistedState(persisted())).toBe(false);
+    spy.mockRestore();
+  });
+});
+
+describe("linkSpeedLabel", () => {
+  it("words one nic, an even bond and a mixed one", () => {
+    expect(linkSpeedLabel(["10gbe"])).toBe("10 gbe");
+    expect(linkSpeedLabel(["10gbe", "10gbe"])).toBe("2 × 10 gbe");
+    expect(linkSpeedLabel(["10gbe", "1gbe"])).toBe("10 gbe + 1 gbe");
+  });
+
+  it("is empty with nothing behind the interface", () => {
+    expect(linkSpeedLabel([])).toBe("");
   });
 });

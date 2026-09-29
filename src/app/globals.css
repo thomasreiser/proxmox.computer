@@ -271,6 +271,10 @@ body {
 .pc-field__control:focus-within { border-color: var(--brand); }
 .pc-field__control:focus-within .pc-field__bracket { color: var(--brand); }
 .pc-field__hint { color: var(--ink-muted); }
+/* what a static ip's value means, under its hint — the prefix is the size
+   of the node's network, and a /32 (alone on the link) is flagged */
+.pc-field__meaning { color: var(--ink-dim); }
+.pc-field__meaning--warn { color: var(--warning); }
 .pc-field__usedfor { color: var(--ink-dim); margin: calc(-1 * var(--space-1)) 0 0 0; }
 .pc-field--error .pc-field__control { border-color: var(--danger); }
 .pc-field--error .pc-field__hint { color: var(--danger); }
@@ -307,6 +311,10 @@ body {
 .pc-stepflow__title { margin: 0 0 var(--space-2) 0; }
 .pc-stepflow__intro { margin: 0; color: var(--ink-muted); }
 .pc-stepflow__fields { display: flex; flex-direction: column; gap: var(--space-5); margin-top: var(--space-6); }
+/* in a wizard card the problem list follows the fields block, which has no
+   bottom margin — the same gap the fields keep between themselves. the
+   preview pages space it with their own flex gap instead. */
+.pc-stepflow__card .pc-problemlist { margin-top: var(--space-5); }
 .pc-stepflow__nav { display: flex; justify-content: space-between; align-items: center; margin-top: var(--space-6); }
 
 /* Table */
@@ -404,6 +412,7 @@ body {
    short, so a tall canvas only fits it to its width and pads the rest
    with empty space. */
 .pc-canvas--storage { height: min(62vh, 620px); }
+.pc-canvas--backups { height: min(56vh, 540px); }
 
 /* The node card's width and the gap between cards are a contract, not a
    style choice: the switch's per-node port groups below reuse both so each
@@ -436,6 +445,8 @@ body {
 .pc-netcard__bridge { display: flex; flex-direction: column; gap: 1px; border-left: 2px solid var(--border); padding-left: var(--space-2); }
 .pc-netcard__bridgetop { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-2); }
 .pc-netcard__bridgename { color: var(--ink); font-weight: 600; }
+/* a storage link: the address sits on the nic or bond, there's no vmbr */
+.pc-netcard__nobridge { color: var(--ink-dim); font-weight: 400; text-transform: uppercase; letter-spacing: 0.06em; font-size: 10px; }
 .pc-netcard__vlan { color: var(--ink-muted); }
 .pc-netcard__vlan--warn { color: var(--warning); }
 .pc-netcard__bridgeaddr { display: flex; align-items: baseline; gap: var(--space-2); }
@@ -477,6 +488,14 @@ body {
 .pc-switch__porttype { color: var(--ink); font-size: 10px; font-weight: 600; line-height: 12px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pc-switch__portvlan { color: var(--ink-muted); font-size: 10px; line-height: 12px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pc-switch__portvlan--warn { color: var(--warning); }
+/* a bond port the switch must group into a lag — the one bond setting with a switch side */
+.pc-switch__portlag { color: var(--brand); font-size: 10px; line-height: 12px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* one grid for the whole list, so every column sizes to its longest entry
+   (a long fqdn) and the rows stay aligned — each item only lays its cells
+   into it (display: contents) */
+.pc-laglist { list-style: none; margin: var(--space-2) 0 0 0; padding: 0; display: grid; grid-template-columns: max-content max-content minmax(0, 1fr) max-content; column-gap: var(--space-4); row-gap: var(--space-1); align-items: baseline; }
+.pc-laglist__item { display: contents; }
+.pc-laglist__item > * { min-width: 0; overflow-wrap: anywhere; }
 .pc-canvas .pc-switch__plug { width: 8px; height: 8px; top: -5px; border-radius: var(--radius-none); border: 1px solid var(--surface-200); background: var(--border-strong); }
 
 /* ================= how-it-works pipeline ================= */
@@ -738,6 +757,22 @@ body {
    exactly where the cable arrives */
 .pc-pool__portbox { position: relative; height: 0; }
 .pc-canvas .pc-pool__plug { width: 8px; height: 8px; left: 50%; border-radius: var(--radius-none); border: 1px solid var(--surface-200); background: var(--brand); }
+
+/* step 4: the backup target and its off-site copy — the pool card's
+   shape in the backup cable's color */
+.pc-pool--backup { border-color: var(--cable-d); }
+.pc-pool--backup .pc-pool__name { color: var(--cable-d); }
+.pc-pool--backup .pc-pool__plug { background: var(--cable-d); }
+.pc-canvas .pc-storcard__plug--backup { background: var(--cable-d); }
+.pc-canvas .pc-pool__plug--offsite { top: auto; bottom: -5px; left: 50%; background: var(--cable-c); }
+.pc-storcard--offsite { border-color: var(--cable-c); }
+.pc-storcard--offsite .pc-storcard__host { color: var(--cable-c); }
+.pc-canvas .pc-offsite__plug { width: 8px; height: 8px; top: -5px; left: 50%; border-radius: var(--radius-none); border: 1px solid var(--surface-200); background: var(--cable-c); }
+
+/* a file picker dressed as a button: the input is visually hidden inside
+   the label, so the label shows where keyboard focus is */
+.pc-btn--file { cursor: pointer; }
+.pc-btn--file:focus-within { outline: 2px solid var(--brand); outline-offset: 2px; }
 
 /* The list of what's blocking a step: where, which field, what's wrong —
    laid out as a small table so a long list stays scannable. */

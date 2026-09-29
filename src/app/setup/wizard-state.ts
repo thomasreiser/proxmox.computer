@@ -12,7 +12,7 @@ export const MAX_NICS_PER_NODE = 8;
 export type CpuVendor = "intel" | "amd";
 export type DiskType = "nvme" | "ssd" | "hdd";
 export type NicSpeed = "1gbe" | "2.5gbe" | "10gbe" | "25gbe" | "other";
-export type WizardStepId = "hardware" | "network" | "storage";
+export type WizardStepId = "hardware" | "network" | "storage" | "backups";
 
 // The physical connector — what the switch port has to match. Speed alone
 // doesn't settle it: 10 gbe is either sfp+ or rj45 (10gbase-t), which need
@@ -147,6 +147,38 @@ export interface LocalPlan {
 // Step 3's cluster-wide answers. Which disks take part is decided per
 // node (see AdditionalDisk.role); everything here is one decision for the
 // whole cluster.
+// Where the cluster's guests are backed up to.
+//   "pbs-external" — a proxmox backup server on its own machine
+//   "pbs-vm"       — a proxmox backup server running as a vm in this cluster
+//   "nfs"          — plain vzdump archives on a network share
+//   "none"         — no backups at all
+export type BackupTarget = "pbs-external" | "pbs-vm" | "nfs" | "none";
+
+// Step 4's answers. Every field is kept whatever the target, so switching
+// target and back doesn't lose what was typed — each target only reads
+// the fields it needs (see backups.ts).
+export interface BackupPlan {
+  target: BackupTarget;
+  // pbs: the server's address, and the datastore that holds the backups
+  pbsAddress: string;
+  datastore: string;
+  // nfs: the server and the exported path
+  nfsServer: string;
+  nfsExport: string;
+  // daily start time, "HH:MM" in 24h
+  schedule: string;
+  // pbs/vzdump retention: how many of each kind of backup to keep
+  keepLast: string;
+  keepDaily: string;
+  keepWeekly: string;
+  keepMonthly: string;
+  // pbs only
+  encrypt: boolean;
+  verify: boolean;
+  offsite: boolean;
+  offsiteAddress: string;
+}
+
 export interface StoragePlan {
   ceph: CephPlan;
   zfs: ZfsPlan;
@@ -169,6 +201,34 @@ export interface ClusterStorage {
 /** the enabled modes, ceph first — the order everything lists them in */
 export function enabledStorageModes(cs: ClusterStorage): StorageMode[] {
   return (["ceph", "zfs"] as const).filter((m) => cs[m]);
+}
+
+// ceph and zfs replication are host-to-host storage traffic: no vm ever
+// joins them, so they never get a bridge of their own. on any interface
+// but the management one they're a *storage link* instead — the node's
+// address sits directly on the nic or bond (see isStorageLink).
+export function isStoragePurpose(purpose: InterfacePurpose): boolean {
+  return purpose === "ceph" || purpose === "zfs";
+}
+
+/**
+ * Whether this bridge slot is really a storage link: the native slot of a
+ * non-management interface, carrying ceph and/or zfs. Its address goes on
+ * the nic or bond itself — there's no vmbr, so its `name` is kept (for
+ * switching back) but never used, and the interface carries nothing else.
+ * The management interface is the exception: its bridge exists for the
+ * web ui anyway, so ceph or zfs there just shares it.
+ */
+export function isStorageLink(network: Pick<NodeNetwork, "managementInterfaceId" | "bridges">, key: string): boolean {
+  const [interfaceId, index] = key.split("#");
+  const bridge = network.bridges[key];
+  return index === "0" && interfaceId !== network.managementInterfaceId && !!bridge && bridge.purposes.some(isStoragePurpose);
+}
+
+/** the name an interface id goes by — its bond's name, or its nic's */
+export function interfaceNameFor(interfaceId: string, nics: NicInfo[], bonds: BondConfig[]): string {
+  if (interfaceId.startsWith("bond-")) return bonds[Number(interfaceId.slice("bond-".length))]?.name || interfaceId;
+  return nics[Number(interfaceId.slice("nic-".length))]?.name || interfaceId;
 }
 
 export type BondMode = "active-backup" | "lacp" | "balance-alb" | "balance-rr";
@@ -327,6 +387,17 @@ export function nicSpeedsForInterface(interfaceId: string, nics: NicInfo[], bond
     .filter((s): s is NicSpeed => s !== undefined);
 }
 
+/**
+ * The speed behind an interface, in words: "10 gbe" for one nic, "2 × 10
+ * gbe" for a bond of equal members, "10 gbe + 1 gbe" for a mixed one —
+ * "" when nothing's behind it. Shared by the previews' link rows.
+ */
+export function linkSpeedLabel(speeds: NicSpeed[]): string {
+  const distinct = [...new Set(speeds)];
+  if (speeds.length > 1 && distinct.length === 1) return `${speeds.length} × ${nicSpeedLabel(distinct[0])}`;
+  return speeds.map(nicSpeedLabel).join(" + ");
+}
+
 // a bridge's storage key is "<interfaceId>#<index>" — index 0 is the
 // interface's native/untagged bridge, 1+ are extra vlan-tagged siblings.
 export function bridgeKey(interfaceId: string, index: number): string {
@@ -378,7 +449,7 @@ export function nicSpeedLabel(speed: NicSpeed): string {
 // it) changes — a mismatched version is discarded wholesale rather than
 // risking a crash or a half-applied state from an older save.
 export const STORAGE_KEY = "proxmox-computer:setup-wizard";
-export const STORAGE_VERSION = 11;
+export const STORAGE_VERSION = 14;
 
 export interface PersistedState {
   version: number;
@@ -387,6 +458,8 @@ export interface PersistedState {
   hostnameSuffix: string;
   globalCidr: string;
   gateway: string;
+  // the dns server every node resolves through — starts as the gateway
+  dns: string;
   // optional — the vlan id the untagged/native segment actually rides on
   // your switch, if you've numbered it. "" means "don't know or don't
   // care", which is the common case for a flat single-vlan homelab.
@@ -399,6 +472,7 @@ export interface PersistedState {
   // keeps every node's disk roles in step — the same bargain
   // identicalNetwork strikes for bridges
   identicalStorage: boolean;
+  backups: BackupPlan;
 }
 
 // deliberately not exhaustive — every individual field getting checked would
@@ -410,15 +484,25 @@ export function isPersistedState(value: unknown): value is PersistedState {
   if (!value || typeof value !== "object") return false;
   const v = value as Record<string, unknown>;
   if (v.version !== STORAGE_VERSION) return false;
-  if (v.currentStep !== "hardware" && v.currentStep !== "network" && v.currentStep !== "storage") return false;
+  if (!["hardware", "network", "storage", "backups"].includes(v.currentStep as string)) return false;
   if (typeof v.nodeCount !== "string") return false;
   if (typeof v.hostnameSuffix !== "string") return false;
   if (typeof v.globalCidr !== "string") return false;
   if (typeof v.gateway !== "string") return false;
+  if (typeof v.dns !== "string") return false;
   if (typeof v.homelabVlan !== "string") return false;
   if (typeof v.identicalHardware !== "boolean") return false;
   if (typeof v.identicalNetwork !== "boolean") return false;
   if (typeof v.identicalStorage !== "boolean") return false;
+  if (!v.backups || typeof v.backups !== "object") return false;
+  const backups = v.backups as Record<string, unknown>;
+  if (!["pbs-external", "pbs-vm", "nfs", "none"].includes(backups.target as string)) return false;
+  for (const key of ["pbsAddress", "datastore", "nfsServer", "nfsExport", "schedule", "keepLast", "keepDaily", "keepWeekly", "keepMonthly", "offsiteAddress"]) {
+    if (typeof backups[key] !== "string") return false;
+  }
+  for (const key of ["encrypt", "verify", "offsite"]) {
+    if (typeof backups[key] !== "boolean") return false;
+  }
   if (!v.storage || typeof v.storage !== "object") return false;
   const storage = v.storage as Record<string, unknown>;
   for (const section of ["ceph", "zfs", "local"]) {
@@ -479,6 +563,19 @@ export function loadPersistedState(): PersistedState | null {
 // a preview lives on its own route, so "continue to the next step" has to
 // hand the wizard its next step through the same saved state the wizard
 // restores from on mount.
+/**
+ * Replaces whatever setup this browser has saved — for reopening one from
+ * a file. False when storage is unavailable (private mode, disabled).
+ */
+export function replacePersistedState(state: PersistedState): boolean {
+  try {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function persistCurrentStep(step: WizardStepId): void {
   try {
     const saved = loadPersistedState();

@@ -98,6 +98,26 @@ export function validateHostCidr(value: string): string | null {
   return null;
 }
 
+/**
+ * What a valid static ip means, spelled out under the field: the prefix is
+ * the size of the node's network, not a network of its own. A /32 leaves
+ * the node alone on its link — no route to its gateway or its peers — so
+ * it's flagged. Null for anything validateHostCidr would reject.
+ */
+export function hostCidrMeaning(value: string): { text: string; warn: boolean } | null {
+  if (!value || validateHostCidr(value)) return null;
+  const info = subnetDetails(value);
+  if (!info) return null;
+  const [ip] = value.split("/");
+  if (info.prefix === 32) {
+    return {
+      text: "/32 puts this node alone on its network — it can't reach the gateway or the other nodes. use the network's prefix, e.g. /24",
+      warn: true,
+    };
+  }
+  return { text: `${ip} is this node's address in the ${info.network}/${info.prefix} network`, warn: false };
+}
+
 // for a bridge that's a pure vm/ct switch — the host itself never gets an
 // address here, but the visitor should still commit to a subnet up front
 // so vm/ct addressing has something to follow later. unlike

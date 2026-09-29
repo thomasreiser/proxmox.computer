@@ -6,6 +6,7 @@ import {
   validateCidr,
   validateFriendlyName,
   validateHostCidr,
+  hostCidrMeaning,
   validateHostLabel,
   validateHostnameSuffix,
   validateIntRange,
@@ -321,5 +322,31 @@ describe("validateOptionalVlanTag", () => {
     expect(validateOptionalVlanTag("4094")).toBeNull();
     expect(validateOptionalVlanTag("4095")).toBe("must be between 1 and 4094");
     expect(validateOptionalVlanTag("x")).toBe("whole numbers only");
+  });
+});
+
+describe("hostCidrMeaning", () => {
+  it("reads the prefix as the size of the node's network", () => {
+    expect(hostCidrMeaning("10.0.10.11/24")).toEqual({
+      text: "10.0.10.11 is this node's address in the 10.0.10.0/24 network",
+      warn: false,
+    });
+    expect(hostCidrMeaning("172.16.4.9/16")?.text).toContain("172.16.0.0/16");
+  });
+
+  // a /32 leaves the node alone on its link, with no route anywhere
+  it("flags a /32", () => {
+    expect(hostCidrMeaning("10.0.10.11/32")).toEqual({ text: expect.stringMatching(/alone on its network/), warn: true });
+  });
+
+  // /31 is a real two-host point-to-point link — nothing to flag
+  it("leaves a /31 alone", () => {
+    expect(hostCidrMeaning("10.0.10.10/31")?.warn).toBe(false);
+  });
+
+  it("says nothing about a value that isn't a valid host address", () => {
+    expect(hostCidrMeaning("")).toBeNull();
+    expect(hostCidrMeaning("10.0.10.0/24")).toBeNull();
+    expect(hostCidrMeaning("nonsense")).toBeNull();
   });
 });
