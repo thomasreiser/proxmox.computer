@@ -33,6 +33,12 @@
   --cable-b: #c084fc;
   --cable-c: #f472b6;
   --cable-d: #22d3ee;
+  /* capacity meters: the cable hues a step darker, inside the lightness
+     band fills need on this surface (checked for colorblind separation) */
+  --meter-host: #4d6350;
+  --meter-ceph: #24a866;
+  --meter-zfs: #9d63dd;
+  --meter-guests: #189db3;
 
   --glow-brand: 0 0 0 1px rgba(49, 226, 140, 0.45), 0 0 20px rgba(49, 226, 140, 0.25);
   --inset-hairline: inset 0 1px 0 rgba(255, 255, 255, 0.03);
@@ -77,6 +83,10 @@
     --cable-b: #8b3fe0;
     --cable-c: #c02b72;
     --cable-d: #0f8fa8;
+    --meter-host: #8f8c78;
+    --meter-ceph: #136b45;
+    --meter-zfs: #8b3fe0;
+    --meter-guests: #0f8fa8;
     --glow-brand: 0 0 0 1px rgba(19, 107, 69, 0.35);
     --inset-hairline: inset 0 1px 0 rgba(0, 0, 0, 0.04);
   }
@@ -277,6 +287,76 @@ body {
 .pc-field__meaning--warn { color: var(--warning); }
 .pc-field__usedfor { color: var(--ink-dim); margin: calc(-1 * var(--space-1)) 0 0 0; }
 .pc-field--error .pc-field__control { border-color: var(--danger); }
+/* a multi-line field (ssh keys): wraps long lines instead of scrolling one */
+.pc-field__textarea { resize: vertical; white-space: pre-wrap; word-break: break-all; font-size: 13px; line-height: 20px; }
+/* a small text button inside a field's frame — show/hide, generate */
+.pc-field__action { flex: none; border: 1px solid var(--border-strong); background: var(--surface-200); color: var(--ink-muted); font-family: var(--font-mono); font-size: 11px; line-height: 16px; padding: 1px 6px; cursor: pointer; }
+.pc-field__action:hover { color: var(--ink); }
+.pc-keylist, .pc-urilist { list-style: none; margin: var(--space-1) 0 0 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+/* capacity meters: a stacked bar per resource, a 2px surface gap between
+   segments, rounded data-ends, free space as the bare track */
+.pc-meter { margin: 0; display: flex; flex-direction: column; gap: var(--space-1); }
+.pc-meter__head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: var(--space-2); }
+.pc-meter__title { color: var(--ink-muted); }
+.pc-meter__total { color: var(--ink); font-size: 12px; }
+.pc-meter__total--over { color: var(--danger); }
+.pc-meter__track { position: relative; display: flex; gap: 2px; height: 12px; border-radius: 4px; background: var(--surface-300); box-shadow: inset 0 0 0 1px var(--border); overflow: visible; }
+.pc-meter__seg { display: block; height: 100%; min-width: 2px; border-radius: 0; }
+.pc-meter__seg:first-child { border-radius: 4px 0 0 4px; }
+.pc-meter__seg:last-of-type { border-radius: 0 4px 4px 0; }
+.pc-meter__seg:only-of-type { border-radius: 4px; }
+.pc-meter__seg--host { background: var(--meter-host); }
+.pc-meter__seg--ceph { background: var(--meter-ceph); }
+.pc-meter__seg--zfs { background: var(--meter-zfs); }
+.pc-meter__seg--guests { background: var(--meter-guests); }
+/* where capacity ends when the segments run past it */
+.pc-meter__limit { position: absolute; top: -3px; bottom: -3px; width: 2px; margin-left: -1px; background: var(--danger); }
+/* the line to stay under */
+.pc-meter__marker { position: absolute; top: -3px; bottom: -3px; width: 0; margin-left: -1px; border-left: 2px dashed var(--ink-muted); }
+.pc-meter__legend { list-style: none; margin: var(--space-1) 0 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 2px var(--space-4); }
+.pc-meter__item { display: flex; align-items: center; gap: var(--space-1); }
+.pc-meter__swatch { width: 8px; height: 8px; border-radius: 2px; flex: none; }
+.pc-meter__swatch--free { background: var(--surface-300); box-shadow: inset 0 0 0 1px var(--border-strong); }
+.pc-meter__swatch--marker { width: 0; height: 10px; border-radius: 0; border-left: 2px dashed var(--ink-muted); }
+.pc-meter__label { color: var(--ink-muted); }
+.pc-meter__value { color: var(--ink); font-size: 12px; }
+.pc-meter__note { margin: 0; color: var(--ink-dim); }
+
+/* step 7's guest editor: proxmox's "advanced" options in sections that
+   open on demand; each disk and nic a sub-card inside */
+.pc-guestsec { border-top: 1px solid var(--border); padding-top: var(--space-3); }
+.pc-guestsec__summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-2) var(--space-3); cursor: pointer; list-style: none; color: var(--ink-muted); }
+.pc-guestsec__summary::-webkit-details-marker { display: none; }
+.pc-guestsec__summary::before { content: "▸"; color: var(--ink-dim); font-family: var(--font-mono); }
+.pc-guestsec[open] > .pc-guestsec__summary::before { content: "▾"; }
+.pc-guestsec__glance { color: var(--ink-dim); overflow-wrap: anywhere; }
+.pc-guestsec__body { display: flex; flex-direction: column; gap: var(--space-4); padding-top: var(--space-4); }
+.pc-guestsub { display: flex; flex-direction: column; gap: var(--space-3); border-left: 2px solid var(--border); padding-left: var(--space-4); }
+
+/* step 7's live "room left": a compact meter per node and pool */
+.pc-meter--compact { gap: 2px; }
+.pc-meter--compact .pc-meter__track { height: 8px; }
+.pc-roomleft { display: flex; flex-direction: column; gap: var(--space-3); border: 1px solid var(--border); background: var(--surface-100); padding: var(--space-4); }
+.pc-roomleft__nodes { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: var(--space-4); }
+.pc-roomleft__node { display: flex; flex-direction: column; gap: var(--space-2); }
+.pc-roomleft__host { margin: 0; color: var(--brand); font-weight: 700; font-size: 13px; }
+
+/* the software preview: a card per node, its guests listed under it */
+.pc-guestgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: var(--space-4); }
+.pc-guestnode { display: flex; flex-direction: column; gap: var(--space-3); border: 1px solid var(--border-strong); background: var(--surface-200); padding: var(--space-4); }
+.pc-guestnode__head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: var(--space-2); }
+.pc-guestnode__host { color: var(--brand); font-weight: 700; }
+.pc-guestnode__meters { display: flex; flex-direction: column; gap: var(--space-4); padding-bottom: var(--space-2); border-bottom: 1px solid var(--border); }
+.pc-guestlist { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-2); }
+.pc-guestlist__item { border-left: 2px solid var(--border); padding-left: var(--space-2); }
+.pc-guestlist__top { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-2); }
+.pc-guestlist__name { color: var(--ink); font-weight: 600; }
+.pc-guestlist__detail { margin: 0; color: var(--ink-muted); overflow-wrap: anywhere; }
+/* the access preview's rows: a name, then what's true of it */
+.pc-access__row { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-1) var(--space-3); }
+.pc-access__dim { color: var(--ink-dim); overflow-wrap: anywhere; }
+.pc-access__ok { color: var(--brand); }
+.pc-access__missing { color: var(--danger); }
 .pc-field--error .pc-field__hint { color: var(--danger); }
 
 /* Checkbox */
@@ -304,7 +384,8 @@ body {
 .pc-radio__label { color: var(--ink); }
 
 /* StepFlow */
-.pc-stepflow { max-width: 896px; }
+/* as wide as the preview pages (max-w-6xl) — room for all seven steps on one row */
+.pc-stepflow { max-width: 1152px; }
 .pc-stepflow__head { margin-bottom: var(--space-6); }
 .pc-stepflow__card { border: 1px solid var(--border); background: var(--surface-200); padding: var(--space-6); }
 .pc-stepflow__meta { margin: 0 0 var(--space-2) 0; }

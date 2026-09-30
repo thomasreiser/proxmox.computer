@@ -28,7 +28,7 @@ export function BackupNodeCard({ data }: NodeProps<BackupNodeType>) {
           </div>
         )}
         {!view.link.dedicated && (
-          <p className="meta pc-storcard__linkreason">no backup link in step 2 — shares management</p>
+          <p className="meta pc-storcard__linkreason">no backup link in step 3 — shares management</p>
         )}
       </div>
       <Handle

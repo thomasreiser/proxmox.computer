@@ -35,7 +35,7 @@ export function defaultNicName(index: number): string {
 
 // a new disk starts in the cluster pool rather than unused: someone
 // adding a disk beyond boot is almost always adding it *for* the cluster
-// storage they picked, and step 3 is where they'd say otherwise.
+// storage they picked, and step 4 is where they'd say otherwise.
 export function defaultNic(index: number): NicInfo {
   return { speed: "1gbe", name: defaultNicName(index), port: "" };
 }

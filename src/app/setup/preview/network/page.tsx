@@ -19,7 +19,9 @@ import {
 import "@xyflow/react/dist/style.css";
 import { problemsUpTo } from "../../step-checks";
 import { ProblemList } from "../../problem-list";
-import { loadPersistedState, persistCurrentStep, type PersistedState } from "../../wizard-state";
+import { type PersistedState } from "../../wizard-state";
+import { loadPersistedState, persistCurrentStep } from "../../saved-state";
+import { VaultGate } from "../../vault-gate";
 import { buildClusterTopology, cephCableCount, distinctVlanTags, lagGroups, type NodeTopology } from "./topology";
 import { NetworkNodeCard, type NetworkNodeCardNode } from "./node-card";
 import { SwitchNode, type SwitchNodeType } from "./switch-node";
@@ -256,6 +258,14 @@ function NetworkCanvas({
 }
 
 export default function NetworkPreview() {
+  return (
+    <VaultGate mode="preview">
+      <NetworkPreviewPage />
+    </VaultGate>
+  );
+}
+
+function NetworkPreviewPage() {
   const router = useRouter();
   const [saved, setSaved] = useState<PersistedState | null>(null);
   const [hydrated, setHydrated] = useState(false);
@@ -269,19 +279,21 @@ export default function NetworkPreview() {
 
   function goToStorage() {
     if (blocking.length > 0) return;
-    persistCurrentStep("storage");
-    router.push("/setup");
+    // the hand-off is saved (encrypted) before the wizard reads it back
+    void persistCurrentStep("storage").then(() => router.push("/setup"));
   }
 
   // reading localStorage during render would desync the client from the
   // server html, so it has to happen post-mount — same trade the wizard
   // itself makes (and the hardware preview repeats).
-  /* eslint-disable react-hooks/set-state-in-effect */
+   
   useEffect(() => {
-    setSaved(loadPersistedState());
-    setHydrated(true);
+    void loadPersistedState().then((state) => {
+      setSaved(state);
+      setHydrated(true);
+    });
   }, []);
-  /* eslint-enable react-hooks/set-state-in-effect */
+   
 
   const homelabVlan = saved?.homelabVlan ? Number(saved.homelabVlan) || null : null;
   const hostnameSuffix = saved?.hostnameSuffix ?? "";
@@ -312,162 +324,165 @@ export default function NetworkPreview() {
       </header>
 
       <main className="flex-1 px-6 py-12">
-        <div className="mx-auto flex max-w-6xl flex-col" style={{ gap: "var(--space-5)" }}>
-          <div>
-            <p className="meta pc-stepflow__meta"># step 2 of 5 — preview</p>
-            <h2 className="h2 pc-stepflow__title">network</h2>
-            <p className="body pc-stepflow__intro">
-              Every nic, cabled to {SWITCH_NAME}. Matching colors mean the same
-              bond — every member still gets its own cable. Each node card
-              lists the bridges its interfaces carry, with the vlan and the
-              address each one sits on — <span className="code">node ip</span>{" "}
-              is an address the host itself answers on,{" "}
-              <span className="code">serves</span> is only the subnet that
-              bridge switches for its vms. Ceph and zfs links are marked{" "}
-              <span className="code">no bridge</span>: their node ip sits on
-              the nic or bond itself. Ports carrying ceph are marked at
-              both ends — those all have to land on one switch. Each switch
-              port shows the connector it needs and how to set its vlans:{" "}
-              <span className="code">u</span> is untagged (native),{" "}
-              <span className="code">t</span> the 802.1q-tagged vlans it
-              carries.
-            </p>
+        {/* nothing until the saved setup is decrypted — no flash of an empty preview */}
+        {hydrated && (
+          <div className="mx-auto flex max-w-6xl flex-col" style={{ gap: "var(--space-5)" }}>
+            <div>
+              <p className="meta pc-stepflow__meta"># step 3 of 8 — preview</p>
+              <h2 className="h2 pc-stepflow__title">network</h2>
+              <p className="body pc-stepflow__intro">
+                Every nic, cabled to {SWITCH_NAME}. Matching colors mean the same
+                bond — every member still gets its own cable. Each node card
+                lists the bridges its interfaces carry, with the vlan and the
+                address each one sits on — <span className="code">node ip</span>{" "}
+                is an address the host itself answers on,{" "}
+                <span className="code">serves</span> is only the subnet that
+                bridge switches for its vms. Ceph and zfs links are marked{" "}
+                <span className="code">no bridge</span>: their node ip sits on
+                the nic or bond itself. Ports carrying ceph are marked at
+                both ends — those all have to land on one switch. Each switch
+                port shows the connector it needs and how to set its vlans:{" "}
+                <span className="code">u</span> is untagged (native),{" "}
+                <span className="code">t</span> the 802.1q-tagged vlans it
+                carries.
+              </p>
+            </div>
+
+            {hydrated && saved && topologies.length > 0 && (
+              <div className="pc-summary">
+                <div className="pc-summary__cell">
+                  <span className="label pc-summary__key">nodes</span>
+                  <span className="code pc-summary__val">{topologies.length}</span>
+                </div>
+                <div className="pc-summary__cell">
+                  <span className="label pc-summary__key">physical links</span>
+                  <span className="code pc-summary__val">{totalCables}</span>
+                </div>
+                <div className="pc-summary__cell">
+                  <span className="label pc-summary__key">bonds</span>
+                  <span className="code pc-summary__val">{countBonds(topologies) || "—"}</span>
+                </div>
+                <div className="pc-summary__cell">
+                  <span className="label pc-summary__key">vlans in use</span>
+                  <span className="code pc-summary__val">{countDistinctVlans(topologies) || "—"}</span>
+                </div>
+                <div className="pc-summary__cell">
+                  <span className="label pc-summary__key">ceph links</span>
+                  <span className={`code pc-summary__val ${cephCables ? "pc-summary__val--ceph" : ""}`}>
+                    {cephCables || "—"}
+                  </span>
+                </div>
+              </div>
+            )}
+
+            {/* the cluster-wide addressing facts every card above is
+                relative to — kept out of the canvas so they stay readable at
+                any zoom, and off the cards so they aren't repeated per node. */}
+            {hydrated && saved && topologies.length > 0 && (
+              <div className="pc-summary">
+                <div className="pc-summary__cell">
+                  <span className="label pc-summary__key">homelab network</span>
+                  <span className="code pc-summary__val pc-summary__val--sm">{saved.globalCidr || "—"}</span>
+                </div>
+                <div className="pc-summary__cell">
+                  <span className="label pc-summary__key">gateway</span>
+                  <span className="code pc-summary__val pc-summary__val--sm">{saved.gateway || "—"}</span>
+                </div>
+                <div className="pc-summary__cell">
+                  <span className="label pc-summary__key">dns server</span>
+                  <span className="code pc-summary__val pc-summary__val--sm">{saved.dns || "—"}</span>
+                </div>
+                <div className="pc-summary__cell">
+                  <span className="label pc-summary__key">native vlan</span>
+                  <span className="code pc-summary__val pc-summary__val--sm">{homelabVlan ?? "untagged"}</span>
+                </div>
+                <div className="pc-summary__cell">
+                  <span className="label pc-summary__key">domain</span>
+                  <span className="code pc-summary__val pc-summary__val--sm">{hostnameSuffix || "—"}</span>
+                </div>
+              </div>
+            )}
+
+            <ReactFlowProvider>
+              <NetworkCanvas topologies={topologies} hydrated={hydrated} hasSaved={!!saved} />
+            </ReactFlowProvider>
+
+            {/* the one thing this diagram asserts about physical layout. it's
+                drawn with a single switch on purpose, and that's exactly the
+                constraint ceph imposes — worth saying out loud, because a
+                visitor with two switches will otherwise split these ports
+                across both without realizing what it costs. */}
+            {/* the one bond setting the switch has to match — without it an
+                lacp bond never comes up, and the ports look fine on their own */}
+            {hydrated && lags.length > 0 && (
+              <div className="pc-callout pc-callout--warning">
+                <span className="code pc-callout__glyph">⚠</span>
+                <div className="pc-callout__body">
+                  <p className="body pc-callout__title">
+                    {lags.length === 1 ? "1 bond needs" : `${lags.length} bonds need`} a lag on the switch
+                  </p>
+                  <p className="body pc-callout__text text-ink-muted">
+                    Group each bond&apos;s ports into one link aggregation group
+                    on the switch — lacp as 802.3ad with lacp active, balance-rr
+                    as a static port-channel. Until the switch agrees, an lacp
+                    bond stays down, even with every cable plugged in. Each
+                    member port is tagged on the switch above.
+                  </p>
+                  <ul className="pc-laglist">
+                    {lags.map((lag) => (
+                      <li key={`${lag.fqdn}-${lag.bondName}`} className="body-sm pc-laglist__item">
+                        <span className="code">{lag.fqdn}</span>
+                        <span className="code">{lag.bondName}</span>
+                        <span className="text-ink-muted">{lag.ports.join(" + ")}</span>
+                        <span className="meta">{lag.lag === "lacp" ? "lacp (802.3ad)" : "static lag"}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              </div>
+            )}
+
+            {hydrated && cephCables > 0 && (
+              <div className="pc-callout pc-callout--warning">
+                <span className="code pc-callout__glyph">⚠</span>
+                <div className="pc-callout__body">
+                  <p className="body pc-callout__title">
+                    all {cephCables} ceph links belong on the same physical switch
+                  </p>
+                  <p className="body pc-callout__text text-ink-muted">
+                    They&apos;re marked above, at both ends of every cable. Ceph
+                    replicates each write to the other nodes and waits for them
+                    before acknowledging it, so every write pays for the slowest
+                    hop between any two nodes. Split these ports across two
+                    switches and every one of those writes crosses the uplink
+                    between them — one shared link carrying all storage traffic,
+                    plus a switch hop of latency on top. Management, vm and
+                    backup links can go wherever you like; keep the ceph ports
+                    together, on one switch, ideally on one asic.
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {hydrated && saved && <ProblemList problems={blocking} step="network" />}
+            <div className="pc-stepflow__nav">
+              <Link href="/setup" className="pc-btn pc-btn--ghost">
+                ← back to network
+              </Link>
+              <button
+                type="button"
+                className="pc-btn pc-btn--primary"
+                onClick={goToStorage}
+                disabled={blocking.length > 0}
+                title={blocking.length > 0 ? "fix the problems listed above first" : undefined}
+              >
+                <span className="pc-btn__bracket">[</span>
+                next
+                <span className="pc-btn__bracket">]</span>
+              </button>
+            </div>
           </div>
-
-          {hydrated && saved && topologies.length > 0 && (
-            <div className="pc-summary">
-              <div className="pc-summary__cell">
-                <span className="label pc-summary__key">nodes</span>
-                <span className="code pc-summary__val">{topologies.length}</span>
-              </div>
-              <div className="pc-summary__cell">
-                <span className="label pc-summary__key">physical links</span>
-                <span className="code pc-summary__val">{totalCables}</span>
-              </div>
-              <div className="pc-summary__cell">
-                <span className="label pc-summary__key">bonds</span>
-                <span className="code pc-summary__val">{countBonds(topologies) || "—"}</span>
-              </div>
-              <div className="pc-summary__cell">
-                <span className="label pc-summary__key">vlans in use</span>
-                <span className="code pc-summary__val">{countDistinctVlans(topologies) || "—"}</span>
-              </div>
-              <div className="pc-summary__cell">
-                <span className="label pc-summary__key">ceph links</span>
-                <span className={`code pc-summary__val ${cephCables ? "pc-summary__val--ceph" : ""}`}>
-                  {cephCables || "—"}
-                </span>
-              </div>
-            </div>
-          )}
-
-          {/* the cluster-wide addressing facts every card above is
-              relative to — kept out of the canvas so they stay readable at
-              any zoom, and off the cards so they aren't repeated per node. */}
-          {hydrated && saved && topologies.length > 0 && (
-            <div className="pc-summary">
-              <div className="pc-summary__cell">
-                <span className="label pc-summary__key">homelab network</span>
-                <span className="code pc-summary__val pc-summary__val--sm">{saved.globalCidr || "—"}</span>
-              </div>
-              <div className="pc-summary__cell">
-                <span className="label pc-summary__key">gateway</span>
-                <span className="code pc-summary__val pc-summary__val--sm">{saved.gateway || "—"}</span>
-              </div>
-              <div className="pc-summary__cell">
-                <span className="label pc-summary__key">dns server</span>
-                <span className="code pc-summary__val pc-summary__val--sm">{saved.dns || "—"}</span>
-              </div>
-              <div className="pc-summary__cell">
-                <span className="label pc-summary__key">native vlan</span>
-                <span className="code pc-summary__val pc-summary__val--sm">{homelabVlan ?? "untagged"}</span>
-              </div>
-              <div className="pc-summary__cell">
-                <span className="label pc-summary__key">domain</span>
-                <span className="code pc-summary__val pc-summary__val--sm">{hostnameSuffix || "—"}</span>
-              </div>
-            </div>
-          )}
-
-          <ReactFlowProvider>
-            <NetworkCanvas topologies={topologies} hydrated={hydrated} hasSaved={!!saved} />
-          </ReactFlowProvider>
-
-          {/* the one thing this diagram asserts about physical layout. it's
-              drawn with a single switch on purpose, and that's exactly the
-              constraint ceph imposes — worth saying out loud, because a
-              visitor with two switches will otherwise split these ports
-              across both without realizing what it costs. */}
-          {/* the one bond setting the switch has to match — without it an
-              lacp bond never comes up, and the ports look fine on their own */}
-          {hydrated && lags.length > 0 && (
-            <div className="pc-callout pc-callout--warning">
-              <span className="code pc-callout__glyph">⚠</span>
-              <div className="pc-callout__body">
-                <p className="body pc-callout__title">
-                  {lags.length === 1 ? "1 bond needs" : `${lags.length} bonds need`} a lag on the switch
-                </p>
-                <p className="body pc-callout__text text-ink-muted">
-                  Group each bond&apos;s ports into one link aggregation group
-                  on the switch — lacp as 802.3ad with lacp active, balance-rr
-                  as a static port-channel. Until the switch agrees, an lacp
-                  bond stays down, even with every cable plugged in. Each
-                  member port is tagged on the switch above.
-                </p>
-                <ul className="pc-laglist">
-                  {lags.map((lag) => (
-                    <li key={`${lag.fqdn}-${lag.bondName}`} className="body-sm pc-laglist__item">
-                      <span className="code">{lag.fqdn}</span>
-                      <span className="code">{lag.bondName}</span>
-                      <span className="text-ink-muted">{lag.ports.join(" + ")}</span>
-                      <span className="meta">{lag.lag === "lacp" ? "lacp (802.3ad)" : "static lag"}</span>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            </div>
-          )}
-
-          {hydrated && cephCables > 0 && (
-            <div className="pc-callout pc-callout--warning">
-              <span className="code pc-callout__glyph">⚠</span>
-              <div className="pc-callout__body">
-                <p className="body pc-callout__title">
-                  all {cephCables} ceph links belong on the same physical switch
-                </p>
-                <p className="body pc-callout__text text-ink-muted">
-                  They&apos;re marked above, at both ends of every cable. Ceph
-                  replicates each write to the other nodes and waits for them
-                  before acknowledging it, so every write pays for the slowest
-                  hop between any two nodes. Split these ports across two
-                  switches and every one of those writes crosses the uplink
-                  between them — one shared link carrying all storage traffic,
-                  plus a switch hop of latency on top. Management, vm and
-                  backup links can go wherever you like; keep the ceph ports
-                  together, on one switch, ideally on one asic.
-                </p>
-              </div>
-            </div>
-          )}
-
-          {hydrated && saved && <ProblemList problems={blocking} step="network" />}
-          <div className="pc-stepflow__nav">
-            <Link href="/setup" className="pc-btn pc-btn--ghost">
-              ← back to network
-            </Link>
-            <button
-              type="button"
-              className="pc-btn pc-btn--primary"
-              onClick={goToStorage}
-              disabled={blocking.length > 0}
-              title={blocking.length > 0 ? "fix the problems listed above first" : undefined}
-            >
-              <span className="pc-btn__bracket">[</span>
-              next
-              <span className="pc-btn__bracket">]</span>
-            </button>
-          </div>
-        </div>
+        )}
       </main>
     </div>
   );

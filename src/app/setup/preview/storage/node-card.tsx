@@ -8,8 +8,8 @@ import { formatGb } from "../../storage";
 export type StorageNodeData = { view: NodeStorageView };
 export type StorageNodeType = Node<StorageNodeData, "storageNode">;
 
-// One node's disks, in the order step 1 declared them, each stamped with
-// the role step 3 gave it. The boot disk sits apart at the top: it's the
+// One node's disks, in the order step 2 declared them, each stamped with
+// the role step 4 gave it. The boot disk sits apart at the top: it's the
 // one disk the visitor never assigns, and mixing it into the list would
 // invite the idea that it could be handed to a pool.
 export function StorageNodeCard({ data }: NodeProps<StorageNodeType>) {

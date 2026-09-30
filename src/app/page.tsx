@@ -3,14 +3,17 @@ import { OpenSetupButton } from "./open-setup";
 import wizardSteps from "@/data/wizard-steps.json";
 
 const topics = [
+  { asks: "where it lives — country, keyboard, timezone", get: "an installer with nothing left to ask" },
   { asks: "your hardware", get: "the exact install steps" },
   { asks: "network interfaces", get: "a bridge/vlan config that works" },
   { asks: "storage — zfs, disks, or ceph", get: "a ready-to-use layout" },
   { asks: "backups", get: "a pbs config, already running" },
+  { asks: "who gets in — ssh keys, root passwords, sso", get: "nodes you can log in to the moment they boot" },
   { asks: "software to run", get: "the vms/containers set up — say, a kubernetes cluster" },
+  { asks: "nothing more", get: "one answer file per node — boot it, and the node installs itself" },
 ];
 
-const activeStepId = "hardware";
+const activeStepId = "location";
 
 export default function Home() {
   return (

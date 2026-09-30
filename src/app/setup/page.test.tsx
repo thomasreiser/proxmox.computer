@@ -5,16 +5,21 @@
  * and the component tree that renders them, which unit tests can't reach.
  */
 import { describe, expect, it, beforeEach } from "vitest";
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import Setup from "./page";
-import { STORAGE_KEY, type PersistedState } from "./wizard-state";
-import { backupPlan, cluster, persistedState } from "./test-fixtures";
+import { STEP_VERSIONS, STORAGE_KEY, type PersistedState } from "./wizard-state";
+import { loadPersistedState, savePersistedState } from "./saved-state";
+import { ED25519_KEY, RSA_KEY, accessPlan, backupPlan, cluster, persistedState } from "./test-fixtures";
+import { defaultAccessPlan } from "./access";
+import { countryFor, keyboardFor, timezoneOptions } from "./location";
+import { lock, unlockStored } from "./vault";
 import { router } from "@/test/router";
 import {
   saved,
   waitForSave,
   setNodeCount,
+  renderAtHardwareStep,
   renderAtNetworkStep,
   renderAtStorageStep,
   renderAtBackupsStep,
@@ -26,12 +31,68 @@ import {
   storageCheckbox,
 } from "./wizard-test-helpers";
 
-describe("step 1 — hardware", () => {
-  beforeEach(() => render(<Setup />));
+describe("step 1 — location", () => {
+  const next = () => screen.getByRole("button", { name: /^\[?\s*next/i });
+
+  // a new setup starts from the browser it's made in (the test runner's)
+  it("opens a new setup on location, guessed from the browser", async () => {
+    render(<Setup />);
+    expect(await screen.findByRole("heading", { name: "location" })).toBeInTheDocument();
+    expect(screen.getByText("# step 1 of 8")).toBeInTheDocument();
+    expect(screen.getByLabelText(/^country/i)).toHaveValue(countryFor(navigator.language));
+    expect(screen.getByLabelText(/^keyboard/i)).toHaveValue(keyboardFor(navigator.language));
+    const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    expect(screen.getByLabelText(/^timezone/i)).toHaveValue(timezoneOptions().includes(zone) ? zone : "UTC");
+  });
+
+  it("saves what's picked, and restores it", async () => {
+    const user = userEvent.setup();
+    const { unmount } = render(<Setup />);
+    await screen.findByRole("heading", { name: "location" });
+    await user.selectOptions(screen.getByLabelText(/^country/i), "ch");
+    await user.selectOptions(screen.getByLabelText(/^keyboard/i), "fr-ch");
+    await user.selectOptions(screen.getByLabelText(/^timezone/i), "Europe/Zurich");
+    await waitForSave((s) => s.location.country === "ch" && s.location.keyboard === "fr-ch" && s.location.timezone === "Europe/Zurich");
+    unmount();
+    render(<Setup />);
+    await screen.findByRole("heading", { name: "location" });
+    await waitFor(() => expect(screen.getByLabelText(/^keyboard/i)).toHaveValue("fr-ch"));
+  });
+
+  // nothing to draw, so it moves on directly — and back
+  it("goes on to hardware, and back", async () => {
+    const user = userEvent.setup();
+    render(<Setup />);
+    await screen.findByRole("heading", { name: "location" });
+    await user.click(next());
+    expect(await screen.findByRole("heading", { name: "hardware" })).toBeInTheDocument();
+    expect(router.push).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: /^\[?\s*back/i }));
+    expect(await screen.findByRole("heading", { name: "location" })).toBeInTheDocument();
+  });
+
+  // a save restored in a browser that doesn't know its timezone
+  it("won't move on with a timezone this browser doesn't know", async () => {
+    await savePersistedState(
+      persistedState({ currentStep: "location", location: { country: "at", keyboard: "de", timezone: "Mars/Olympus_Mons" } }),
+    );
+    const user = userEvent.setup();
+    render(<Setup />);
+    await screen.findByRole("heading", { name: "location" });
+    await user.click(next());
+    expect(screen.getByRole("alert")).toHaveTextContent(/timezone/i);
+    expect(screen.queryByRole("heading", { name: "hardware" })).not.toBeInTheDocument();
+  });
+});
+
+describe("step 2 — hardware", () => {
+  beforeEach(async () => {
+    await renderAtHardwareStep();
+  });
 
   it("opens on the hardware step", () => {
     expect(screen.getByRole("heading", { name: "hardware" })).toBeInTheDocument();
-    expect(screen.getByText("# step 1 of 5")).toBeInTheDocument();
+    expect(screen.getByText("# step 2 of 8")).toBeInTheDocument();
   });
 
   it("starts as a single standalone node", async () => {
@@ -90,7 +151,7 @@ describe("continuing past a step", () => {
   // the reported bug: step 1 moved on with no memory entered
   it("won't hand off to the preview while memory is missing", async () => {
     const user = userEvent.setup();
-    render(<Setup />);
+    await renderAtHardwareStep();
     await user.click(screen.getByRole("button", { name: /preview/i }));
     expect(router.push).not.toHaveBeenCalled();
     const alert = screen.getByRole("alert");
@@ -103,7 +164,7 @@ describe("continuing past a step", () => {
   // has to point at the untouched empty one
   it("shows the error on fields nobody has touched yet", async () => {
     const user = userEvent.setup();
-    render(<Setup />);
+    await renderAtHardwareStep();
     const ram = screen.getByLabelText(/^memory \(gb\)/i);
     expect(ram.closest(".pc-field")).not.toHaveClass("pc-field--error");
     await user.click(screen.getByRole("button", { name: /preview/i }));
@@ -113,7 +174,7 @@ describe("continuing past a step", () => {
 
   it("lets the visitor through once the problems are fixed", async () => {
     const user = userEvent.setup();
-    render(<Setup />);
+    await renderAtHardwareStep();
     await user.click(screen.getByRole("button", { name: /preview/i }));
     expect(screen.getByRole("alert")).toBeInTheDocument();
     await fillRequiredHardware(user);
@@ -124,7 +185,7 @@ describe("continuing past a step", () => {
 
   it("lists one entry per node that's missing something", async () => {
     const user = userEvent.setup();
-    render(<Setup />);
+    await renderAtHardwareStep();
     await setNodeCount(user, "3");
     await user.click(screen.getByRole("button", { name: /preview/i }));
     const alert = screen.getByRole("alert");
@@ -133,11 +194,8 @@ describe("continuing past a step", () => {
 
   // a later step is built on the earlier ones: a save restored at step 2
   // with a gap in step 1 can't move on either
-  it("blocks step 2 on a gap left in step 1, and says which step it's in", async () => {
-    window.localStorage.setItem(
-      STORAGE_KEY,
-      JSON.stringify(persistedState({ currentStep: "network", nodes: cluster(1, { ramGb: "" }), nodeCount: "1" })),
-    );
+  it("blocks step 3 on a gap left in step 2, and says which step it's in", async () => {
+    await savePersistedState(persistedState({ currentStep: "network", nodes: cluster(1, { ramGb: "" }), nodeCount: "1" }));
     const user = userEvent.setup();
     render(<Setup />);
     await screen.findByRole("heading", { name: "network" });
@@ -159,7 +217,7 @@ describe("continuing past a step", () => {
 describe("persistence", () => {
   it("saves what was entered and restores it on remount", async () => {
     const user = userEvent.setup();
-    const { unmount } = render(<Setup />);
+    const { unmount } = await renderAtHardwareStep();
     await setNodeCount(user, "3");
     await screen.findByText(/3 nodes gets automatic quorum/i);
 
@@ -170,32 +228,79 @@ describe("persistence", () => {
     expect(await screen.findByLabelText(/number of nodes/i)).toHaveValue(3);
   });
 
-  // a save from an older build has a different shape, so it's discarded
-  // wholesale rather than risking a half-applied state.
-  it("ignores a save from another storage version", async () => {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ version: 1, nodeCount: "9" }));
+  // a build that changed step 5 keeps steps 1–4 of a save, and starts 5 on over
+  it("keeps the steps before one this build changed, and says so", async () => {
+    const saved = persistedState({ currentStep: "software", hostnameSuffix: "lab.lan", backups: backupPlan({ keepDaily: "30" }) });
+    await savePersistedState({ ...saved, stepVersions: { ...saved.stepVersions, backups: saved.stepVersions.backups - 1 } });
+    const user = userEvent.setup();
     render(<Setup />);
-    expect(await screen.findByRole("heading", { name: "hardware" })).toBeInTheDocument();
+    // back on the changed step, never past it
+    expect(await screen.findByRole("heading", { name: "backups" })).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "step 5, backups, has changed since this setup was saved — it and the steps after it start over. steps 1–4 are kept.",
+    );
+    // step 3's answer is still there; step 5's is back at its default
+    await waitForSave((s) => s.stepVersions.backups === STEP_VERSIONS.backups);
+    const state = await loadPersistedState();
+    expect(state?.hostnameSuffix).toBe("lab.lan");
+    expect(state?.backups.keepDaily).not.toBe("30");
+
+    await user.click(screen.getByRole("button", { name: /^got it$/i }));
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+
+  it("says nothing when a save comes back whole", async () => {
+    await savePersistedState(persistedState({ currentStep: "backups" }));
+    render(<Setup />);
+    expect(await screen.findByRole("heading", { name: "backups" })).toBeInTheDocument();
+    expect(screen.queryByText(/has changed since this setup was saved/)).not.toBeInTheDocument();
+  });
+
+  // another layout of the save altogether is discarded wholesale rather
+  // than risking a half-applied state.
+  it("ignores a save from another storage version", async () => {
+    await savePersistedState({ ...persistedState(), version: 1, nodeCount: "9" });
+    render(<Setup />);
+    expect(await screen.findByRole("heading", { name: "location" })).toBeInTheDocument();
     expect(screen.queryByDisplayValue("9")).not.toBeInTheDocument();
+  });
+
+  // saves from before encryption were plain json — nothing to unlock
+  it("ignores a plain, unencrypted save from before", async () => {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...persistedState(), nodeCount: "9" }));
+    render(<Setup />);
+    expect(await screen.findByRole("heading", { name: "location" })).toBeInTheDocument();
+    expect(screen.queryByDisplayValue("9")).not.toBeInTheDocument();
+  });
+
+  // nothing readable at rest: the passwords step 5 holds never hit disk in the clear
+  it("saves the setup encrypted", async () => {
+    const user = userEvent.setup();
+    await renderAtHardwareStep();
+    await setNodeCount(user, "3");
+    await waitForSave((state) => state.nodeCount === "3");
+    const raw = window.localStorage.getItem(STORAGE_KEY) ?? "";
+    expect(raw).not.toContain("nodeCount");
+    expect(raw).not.toContain("pve01");
   });
 
   it("survives corrupt json without crashing", async () => {
     window.localStorage.setItem(STORAGE_KEY, "{ not json");
     render(<Setup />);
-    expect(await screen.findByRole("heading", { name: "hardware" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "location" })).toBeInTheDocument();
   });
 });
 
-describe("step 2 — network", () => {
+describe("step 3 — network", () => {
   it("restores at the network step after the preview hands off", async () => {
     await renderAtNetworkStep();
-    expect(screen.getByText("# step 2 of 5")).toBeInTheDocument();
+    expect(screen.getByText("# step 3 of 8")).toBeInTheDocument();
   });
 
   it("derives a gateway and per-node addresses from the homelab subnet", async () => {
     await renderAtNetworkStep({ nodeCount: "2" });
     await waitForSave((state) => state.gateway === "10.0.10.1");
-    expect(saved()?.nodes.map((n) => n.network.cidr)).toEqual(["10.0.10.11/24", "10.0.10.12/24"]);
+    expect((await saved())?.nodes.map((n) => n.network.cidr)).toEqual(["10.0.10.11/24", "10.0.10.12/24"]);
   });
 
   // cluster storage is a cluster-wide decision, so it has nothing to
@@ -220,7 +325,7 @@ describe("step 2 — network", () => {
     await user.clear(suffix);
     await user.type(suffix, "lab.lan");
     await waitForSave((state) => state.hostnameSuffix === "lab.lan");
-    expect(saved()?.nodes.map((n) => n.network.hostLabel)).toEqual(["pve01", "pve02"]);
+    expect((await saved())?.nodes.map((n) => n.network.hostLabel)).toEqual(["pve01", "pve02"]);
   });
 });
 
@@ -369,7 +474,7 @@ describe("ceph and zfs together", () => {
     expect(screen.getAllByText(/no nic on this node is set up for zfs replication traffic/i).length).toBeGreaterThan(0);
   });
 
-  it("offers both roles per disk and plans both pools in step 3", async () => {
+  it("offers both roles per disk and plans both pools in step 4", async () => {
     await renderAtStorageStep({
       nodeCount: "3",
       onHardware: addTwoSpareDisks,
@@ -403,14 +508,14 @@ describe("ceph and zfs together", () => {
       onNetwork: async (user) => {
         await chooseClusterStorage(user, { ceph: true, zfs: false });
         await waitForSave((s) => !s.clusterStorage.zfs);
-        const state = saved() as PersistedState;
+        const state = (await saved()) as PersistedState;
         for (const n of state.nodes) n.additionalDisks[1].role = "zfs";
-        window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+        await savePersistedState(state);
       },
     });
     // zfs is off, so the disk shows in ceph — but the choice is kept
     expect(screen.queryByRole("radio", { name: /^zfs pool member/ })).not.toBeInTheDocument();
-    expect(saved()?.nodes.every((n) => n.additionalDisks[1].role === "zfs")).toBe(true);
+    expect((await saved())?.nodes.every((n) => n.additionalDisks[1].role === "zfs")).toBe(true);
   });
 });
 
@@ -443,13 +548,13 @@ describe("node-level network advice", () => {
   });
 });
 
-describe("step 3 — storage", () => {
+describe("step 4 — storage", () => {
   /** zfs replication only, picked in step 2 on the way through */
   const chooseZfs = (user: ReturnType<typeof userEvent.setup>) => chooseClusterStorage(user, { ceph: false, zfs: true });
 
   it("restores at the storage step after the preview hands off", async () => {
     await renderAtStorageStep({ nodeCount: "3", onHardware: addSpareDisk });
-    expect(screen.getByText("# step 3 of 5")).toBeInTheDocument();
+    expect(screen.getByText("# step 4 of 8")).toBeInTheDocument();
   });
 
   // step 1 declared the disks; step 3 is where they get a job.
@@ -487,20 +592,20 @@ describe("step 3 — storage", () => {
       onHardware: addSpareDisk,
       onNetwork: async () => {
         // simulate a save from when the node had a choice
-        const state = saved() as PersistedState;
+        const state = (await saved()) as PersistedState;
         for (const n of state.nodes) n.additionalDisks[0].role = "local";
-        window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+        await savePersistedState(state);
       },
     });
     for (const radio of screen.getAllByRole("radio", { name: /^ceph osd/ })) expect(radio).toBeChecked();
-    expect(saved()?.nodes.every((n) => n.additionalDisks[0].role === "local")).toBe(true);
+    expect((await saved())?.nodes.every((n) => n.additionalDisks[0].role === "local")).toBe(true);
   });
 
   // a new disk has no role stored; it shows in the storage that's on
   it("shows an unchosen disk in the cluster storage that's on", async () => {
     await renderAtStorageStep({ nodeCount: "3", onHardware: addTwoSpareDisks });
     for (const radio of screen.getAllByRole("radio", { name: /^ceph osd/ })) expect(radio).toBeChecked();
-    expect(saved()?.nodes.every((n) => n.additionalDisks.every((d) => d.role === ""))).toBe(true);
+    expect((await saved())?.nodes.every((n) => n.additionalDisks.every((d) => d.role === ""))).toBe(true);
   });
 
   it("names the pool role after the mode — zfs, not ceph", async () => {
@@ -583,9 +688,9 @@ describe("step 3 — storage", () => {
       nodeCount: "2",
       onHardware: addSpareDisk,
       onNetwork: async () => {
-        const state = saved() as PersistedState;
+        const state = (await saved()) as PersistedState;
         state.storage.ceph = { ...state.storage.ceph, replicas: "3", minReplicas: "3" };
-        window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+        await savePersistedState(state);
       },
     });
     expect(screen.getByLabelText(/replicas \(size\)/i)).toHaveValue("2");
@@ -648,13 +753,13 @@ describe("step 3 — storage", () => {
         // let the zfs choice's own autosave land first, or this edit would
         // be written over a state that still says ceph
         await waitForSave((s) => s.clusterStorage.zfs && !s.clusterStorage.ceph);
-        const state = saved() as PersistedState;
+        const state = (await saved()) as PersistedState;
         state.storage.zfs = { ...state.storage.zfs, raidLevel: "raidz2" };
-        window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+        await savePersistedState(state);
       },
     });
     expect(screen.getByRole("radio", { name: /^mirror/ })).toBeChecked();
-    expect(saved()?.storage.zfs.raidLevel).toBe("raidz2");
+    expect((await saved())?.storage.zfs.raidLevel).toBe("raidz2");
   });
 
   it("keeps the disk roles but drops the pool card with no cluster storage", async () => {
@@ -707,20 +812,17 @@ describe("step 3 — storage", () => {
   });
 });
 
-describe("step 4 — backups", () => {
+describe("step 5 — backups", () => {
   // a save that got past steps 1–3, left at step 4 with the backup
   // defaults — the pbs address still blank, as a visitor would find it
   async function renderStep4(backups = backupPlan({ pbsAddress: "" })) {
-    window.localStorage.setItem(
-      STORAGE_KEY,
-      JSON.stringify(
+    await savePersistedState(
         persistedState({
           currentStep: "backups",
           nodes: cluster(3, { ramGb: "64", bootDiskSizeGb: "512" }),
           backups,
         }),
-      ),
-    );
+      );
     const user = userEvent.setup();
     render(<Setup />);
     await screen.findByRole("heading", { name: "backups" });
@@ -728,7 +830,7 @@ describe("step 4 — backups", () => {
   }
   const target = (name: RegExp) => screen.getByRole("radio", { name });
 
-  it("is reached from step 3 through its hand-off", async () => {
+  it("is reached from step 4 through its hand-off", async () => {
     await renderAtBackupsStep();
     expect(target(/on its own machine/i)).toBeChecked();
     expect(screen.getByLabelText(/pbs address/i)).toHaveValue("");
@@ -863,3 +965,555 @@ function summaryVal(key: RegExp): string {
   const keyEl = screen.getAllByText(key).find((el) => el.classList.contains("pc-summary__key"));
   return keyEl?.parentElement?.querySelector(".pc-summary__val")?.textContent ?? "";
 }
+
+describe("step 6 — access", () => {
+  // a save that got past steps 1–4, left at step 5 with nothing entered yet
+  async function renderStep5(access = defaultAccessPlan()) {
+    await savePersistedState(
+      persistedState({ currentStep: "access", nodes: cluster(3, { ramGb: "64", bootDiskSizeGb: "512" }), access }),
+    );
+    const user = userEvent.setup();
+    render(<Setup />);
+    await screen.findByRole("heading", { name: "access" });
+    return user;
+  }
+  const keysField = () => screen.getByLabelText(/^ssh public key/i);
+  const passwordFields = () => screen.getAllByLabelText(/^root password — /i) as HTMLInputElement[];
+
+  it("asks for a key and a root password per node, with password ssh off", async () => {
+    await renderStep5();
+    expect(screen.getByText("# step 6 of 8")).toBeInTheDocument();
+    expect(keysField()).toHaveValue("");
+    expect(passwordFields().map((f) => f.id)).toEqual(["rootpw-0", "rootpw-1", "rootpw-2"]);
+    expect(screen.getByLabelText(/^root password — pve02/i)).toHaveAttribute("type", "password");
+    expect(screen.getByRole("checkbox", { name: /^turn off password logins over ssh/i })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: /^sign in to the web ui with oidc/i })).not.toBeChecked();
+  });
+
+  it("won't preview without a key and every password, and lists them", async () => {
+    const user = await renderStep5();
+    await user.click(screen.getByRole("button", { name: /preview/i }));
+    expect(router.push).not.toHaveBeenCalled();
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent(/ssh public key/i);
+    for (const node of ["pve01", "pve02", "pve03"]) expect(alert).toHaveTextContent(new RegExp(`${node}.*root password`, "i"));
+
+    await user.click(keysField());
+    await user.paste(ED25519_KEY);
+    for (const button of screen.getAllByRole("button", { name: /^generate$/i })) await user.click(button);
+    await user.click(screen.getByRole("button", { name: /preview/i }));
+    expect(router.push).toHaveBeenCalledWith("/setup/preview/access");
+  });
+
+  it("lists the keys it recognizes", async () => {
+    const user = await renderStep5();
+    await user.click(keysField());
+    await user.paste(`${ED25519_KEY}\n${RSA_KEY}`);
+    expect(screen.getByText("test@fixture")).toBeInTheDocument();
+    expect(screen.getByText("rsa@fixture")).toBeInTheDocument();
+  });
+
+  // flagged the moment it's pasted — not after the field is left
+  it("flags a pasted private key at once", async () => {
+    const user = await renderStep5();
+    await user.click(keysField());
+    await user.paste("-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----");
+    expect(screen.getByText(/that's a private key — never paste it anywhere/i)).toBeInTheDocument();
+  });
+
+  it("hides a password until it's asked for", async () => {
+    const user = await renderStep5();
+    const field = screen.getByLabelText(/^root password — pve01/i);
+    await user.type(field, "correct-horse-battery");
+    expect(field).toHaveAttribute("type", "password");
+    await user.click(within(field.closest(".pc-field") as HTMLElement).getByRole("button", { name: /^show$/i }));
+    expect(field).toHaveAttribute("type", "text");
+    expect(field).toHaveValue("correct-horse-battery");
+  });
+
+  // a generated password is useless until it's copied somewhere safe
+  it("generates a password and shows it", async () => {
+    const user = await renderStep5();
+    const field = screen.getByLabelText(/^root password — pve02/i);
+    await user.click(within(field.closest(".pc-field") as HTMLElement).getByRole("button", { name: /^generate$/i }));
+    expect(field).toHaveAttribute("type", "text");
+    expect((field as HTMLInputElement).value).toMatch(/^[a-km-zA-HJ-NP-Z2-9]{24}$/);
+  });
+
+  it("warns when ssh keeps taking passwords", async () => {
+    const user = await renderStep5();
+    expect(screen.queryByText(/anything that reaches port 22/i)).not.toBeInTheDocument();
+    await user.click(screen.getByRole("checkbox", { name: /^turn off password logins over ssh/i }));
+    expect(screen.getByText(/anything that reaches port 22/i)).toBeInTheDocument();
+    await waitForSave((s) => s.access.disablePasswordSsh === false);
+  });
+
+  it("sets up oidc on request, with the redirect uris to register", async () => {
+    const user = await renderStep5(accessPlan());
+    expect(screen.queryByLabelText(/^issuer url/i)).not.toBeInTheDocument();
+    await user.click(screen.getByRole("checkbox", { name: /^sign in to the web ui with oidc/i }));
+    expect(screen.getByLabelText(/^realm/i)).toHaveValue("oidc");
+    expect(screen.getByLabelText(/^client secret/i)).toHaveAttribute("type", "password");
+    expect(screen.getByText("https://pve01.lab.lan:8006")).toBeInTheDocument();
+    expect(screen.getByText("https://pve03.lab.lan:8006")).toBeInTheDocument();
+
+    // required once it's on
+    await user.click(screen.getByRole("button", { name: /preview/i }));
+    expect(screen.getByRole("alert")).toHaveTextContent(/issuer url/i);
+
+    await user.type(screen.getByLabelText(/^issuer url/i), "https://auth.lab.lan/application/o/pve/");
+    await user.type(screen.getByLabelText(/^client id/i), "proxmox");
+    await user.click(screen.getByRole("radio", { name: /^email/i }));
+    await waitForSave((s) => s.access.oidc.enabled && s.access.oidc.clientId === "proxmox" && s.access.oidc.usernameClaim === "email");
+    await user.click(screen.getByRole("button", { name: /preview/i }));
+    expect(router.push).toHaveBeenCalledWith("/setup/preview/access");
+  });
+
+  it("notes one root password on every node", async () => {
+    const user = await renderStep5(accessPlan({ rootPasswords: [] }));
+    for (const field of passwordFields()) await user.type(field, "same-password-everywhere");
+    expect(screen.getByText(/every node has the same root password/i)).toBeInTheDocument();
+  });
+
+  // the whole reason for the passphrase
+  it("saves the passwords encrypted", async () => {
+    const user = await renderStep5();
+    await user.type(screen.getByLabelText(/^root password — pve01/i), "a-secret-root-password");
+    await waitForSave((s) => s.access.rootPasswords[0] === "a-secret-root-password");
+    expect(window.localStorage.getItem(STORAGE_KEY)).not.toContain("a-secret-root-password");
+  });
+
+  it("goes back to backups", async () => {
+    const user = await renderStep5();
+    await user.click(screen.getByRole("button", { name: /^\[?\s*back/i }));
+    expect(await screen.findByRole("heading", { name: "backups" })).toBeInTheDocument();
+  });
+});
+
+describe("the passphrase", () => {
+  // every other test starts unlocked; these start as a fresh visit does
+  it("asks for a new passphrase before the wizard opens, and wants it twice", async () => {
+    lock();
+    const user = userEvent.setup();
+    render(<Setup />);
+    expect(await screen.findByRole("heading", { name: "choose a passphrase" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "location" })).not.toBeInTheDocument();
+
+    await user.type(screen.getByLabelText(/^passphrase/i), "short");
+    await user.click(screen.getByRole("button", { name: /start/i }));
+    expect(screen.getByRole("alert")).toHaveTextContent(/at least 12 characters/i);
+
+    await user.clear(screen.getByLabelText(/^passphrase/i));
+    await user.type(screen.getByLabelText(/^passphrase/i), "a long enough passphrase");
+    await user.type(screen.getByLabelText(/^once more/i), "a long enough passphrase!");
+    await user.click(screen.getByRole("button", { name: /start/i }));
+    expect(screen.getByRole("alert")).toHaveTextContent(/don't match/i);
+
+    await user.clear(screen.getByLabelText(/^once more/i));
+    await user.type(screen.getByLabelText(/^once more/i), "a long enough passphrase");
+    await user.click(screen.getByRole("button", { name: /start/i }));
+    expect(await screen.findByRole("heading", { name: "location" })).toBeInTheDocument();
+
+    // what it saves opens with that passphrase, and only that one
+    await user.click(screen.getByRole("button", { name: /^\[?\s*next/i }));
+    await setNodeCount(user, "2");
+    await waitForSave((s) => s.nodeCount === "2");
+    lock();
+    expect(await unlockStored("a long enough passphrase")).toMatchObject({ nodeCount: "2" });
+  });
+
+  it("unlocks a saved setup, and restores it", async () => {
+    await savePersistedState(persistedState({ currentStep: "network" }));
+    lock();
+    const user = userEvent.setup();
+    render(<Setup />);
+    expect(await screen.findByRole("heading", { name: "unlock your setup" })).toBeInTheDocument();
+
+    await user.type(screen.getByLabelText(/^passphrase/i), "the wrong one");
+    await user.click(screen.getByRole("button", { name: /^\[?\s*unlock/i }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(/not the passphrase/i);
+
+    await user.clear(screen.getByLabelText(/^passphrase/i));
+    await user.type(screen.getByLabelText(/^passphrase/i), "test passphrase");
+    await user.click(screen.getByRole("button", { name: /^\[?\s*unlock/i }));
+    expect(await screen.findByRole("heading", { name: "network" })).toBeInTheDocument();
+  });
+
+  // without the passphrase nobody can read it — starting over is the only way on
+  it("starts over, deleting the saved setup, only once confirmed", async () => {
+    await savePersistedState(persistedState({ currentStep: "network" }));
+    lock();
+    const user = userEvent.setup();
+    render(<Setup />);
+    await user.click(await screen.findByRole("button", { name: /forgot it\? start over/i }));
+    await user.click(screen.getByRole("button", { name: /^keep it$/i }));
+    expect(window.localStorage.getItem(STORAGE_KEY)).not.toBeNull();
+
+    await user.click(screen.getByRole("button", { name: /forgot it\? start over/i }));
+    await user.click(screen.getByRole("button", { name: /delete it and start over/i }));
+    expect(window.localStorage.getItem(STORAGE_KEY)).toBeNull();
+    expect(await screen.findByRole("heading", { name: "choose a passphrase" })).toBeInTheDocument();
+  });
+});
+
+describe("step 7 — software", () => {
+  // a complete setup, left at step 7 with no guests yet
+  async function renderStep7(overrides: Partial<PersistedState> = {}) {
+    await savePersistedState(
+      persistedState({
+        currentStep: "software",
+        nodes: cluster(3, { ramGb: "64", bootDiskSizeGb: "512" }),
+        ...overrides,
+      }),
+    );
+    const user = userEvent.setup();
+    render(<Setup />);
+    await screen.findByRole("heading", { name: "software" });
+    return user;
+  }
+  const add = (user: ReturnType<typeof userEvent.setup>, what: RegExp) => user.click(screen.getByRole("button", { name: what }));
+
+  // optional: nothing to add, nothing to preview
+  it("can be skipped straight to the install", async () => {
+    const user = await renderStep7();
+    expect(screen.getByText("# step 7 of 8")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /preview/i })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /^\[?\s*skip/i }));
+    expect(await screen.findByRole("heading", { name: "install" })).toBeInTheDocument();
+    expect(router.push).not.toHaveBeenCalled();
+  });
+
+  it("adds a vm and a container with valid defaults, and previews them", async () => {
+    const user = await renderStep7();
+    await add(user, /^\[?\s*\+ vm/i);
+    await add(user, /^\[?\s*\+ container/i);
+    expect(screen.getByText(/^vm 100 — vm-01/)).toBeInTheDocument();
+    expect(screen.getByText(/^container 101 — ct-01/)).toBeInTheDocument();
+    await waitForSave((s) => s.software.guests.map((g) => g.kind).join() === "vm,container");
+    // with guests, it's a preview like every other step
+    expect(screen.queryByRole("button", { name: /^\[?\s*skip/i })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /preview/i }));
+    expect(router.push).toHaveBeenCalledWith("/setup/preview/software");
+  });
+
+  describe("kubernetes", () => {
+    const planner = () => screen.getByRole("group", { name: "kubernetes cluster" });
+    const placement = () => within(screen.getByRole("list", { name: "kubernetes placement" })).getAllByRole("listitem").map((li) => li.textContent);
+
+    // counts and placement come first — nothing is added until they're confirmed
+    it("asks for control planes, workers and placement before adding a vm", async () => {
+      const user = await renderStep7();
+      await add(user, /^\[?\s*\+ kubernetes/i);
+      expect(screen.queryByText(/^vm 100/)).not.toBeInTheDocument();
+      expect(within(planner()).getByLabelText(/^control planes/i)).toHaveValue("3");
+      expect(within(planner()).getByLabelText(/^workers/i)).toHaveValue("3");
+      expect(within(planner()).getByRole("radio", { name: /^side by side/i })).toBeChecked();
+      // three nodes: separate would leave the workers nowhere
+      expect(within(planner()).queryByRole("radio", { name: /^separate/i })).not.toBeInTheDocument();
+      expect(placement()).toEqual(["pve01: 1 control plane · 1 worker", "pve02: 1 control plane · 1 worker", "pve03: 1 control plane · 1 worker"]);
+
+      await user.click(within(planner()).getByRole("button", { name: /add 6 vms/i }));
+      expect(screen.queryByRole("group", { name: "kubernetes cluster" })).not.toBeInTheDocument();
+      await waitForSave(
+        (s) =>
+          s.software.guests.map((g) => `${g.name}@${g.node}`).join() ===
+          "k8s-cp-01@0,k8s-cp-02@1,k8s-cp-03@2,k8s-worker-01@0,k8s-worker-02@1,k8s-worker-03@2",
+      );
+      const saved = (await loadPersistedState())!.software.guests;
+      expect(saved.every((g) => !g.ha && g.disks[0].storage === "local-lvm" && g.cpuType === "host")).toBe(true);
+    });
+
+    it("places what the visitor picks, and warns about control planes sharing nodes", async () => {
+      const user = await renderStep7({ nodes: cluster(2, { ramGb: "64", bootDiskSizeGb: "512" }) });
+      await add(user, /^\[?\s*\+ kubernetes/i);
+      expect(within(planner()).getByLabelText(/^control planes/i)).toHaveValue("1");
+      await user.selectOptions(within(planner()).getByLabelText(/^control planes/i), "3");
+      await user.selectOptions(within(planner()).getByLabelText(/^workers/i), "0");
+      expect(placement()).toEqual(["pve01: 2 control planes", "pve02: 1 control plane"]);
+      expect(within(planner()).getByText(/3 control planes on 2 nodes/)).toBeInTheDocument();
+      expect(within(planner()).getByText(/allowSchedulingOnControlPlanes/)).toBeInTheDocument();
+      await user.click(within(planner()).getByRole("button", { name: /add 3 vms/i }));
+      await waitForSave((s) => s.software.guests.map((g) => g.k8sRole).join() === "control-plane,control-plane,control-plane");
+    });
+
+    // from six nodes the control planes get nodes of their own
+    it("proposes separate control plane nodes on a big cluster", async () => {
+      const user = await renderStep7({ nodes: cluster(6, { ramGb: "64", bootDiskSizeGb: "512" }) });
+      await add(user, /^\[?\s*\+ kubernetes/i);
+      expect(within(planner()).getByRole("radio", { name: /^separate/i })).toBeChecked();
+      expect(placement().slice(2, 4)).toEqual(["pve03: 1 control plane", "pve04: 1 worker"]);
+      await user.click(within(planner()).getByRole("radio", { name: /^side by side/i }));
+      await user.selectOptions(within(planner()).getByLabelText(/^workers/i), "6");
+      expect(placement()[0]).toBe("pve01: 1 control plane · 1 worker");
+    });
+
+    it("re-plans in place of the vms it made, keeping other guests, and cancels without a change", async () => {
+      const user = await renderStep7();
+      await add(user, /^\[?\s*\+ vm/i);
+      await add(user, /^\[?\s*\+ kubernetes/i);
+      await user.click(within(planner()).getByRole("button", { name: /^\[?\s*cancel/i }));
+      expect(screen.queryByRole("group", { name: "kubernetes cluster" })).not.toBeInTheDocument();
+      await add(user, /^\[?\s*\+ kubernetes/i);
+      await user.click(within(planner()).getByRole("button", { name: /add 6 vms/i }));
+      await waitForSave((s) => s.software.guests.length === 7);
+
+      await add(user, /^\[?\s*re-plan kubernetes/i);
+      // it reopens on the layout the vms have
+      expect(within(planner()).getByLabelText(/^workers/i)).toHaveValue("3");
+      await user.selectOptions(within(planner()).getByLabelText(/^workers/i), "1");
+      await user.click(within(planner()).getByRole("button", { name: /replace the 6 kubernetes vms with 4/i }));
+      await waitForSave((s) => s.software.guests.map((g) => g.name).join() === "vm-01,k8s-cp-01,k8s-cp-02,k8s-cp-03,k8s-worker-01");
+    });
+
+    // kubernetes moves pods itself; its data lives in ceph
+    it("offers a kubernetes vm no ha, and keeps its volumes on ceph", async () => {
+      const user = await renderStep7();
+      await add(user, /^\[?\s*\+ kubernetes/i);
+      await user.click(within(planner()).getByRole("button", { name: /add 6 vms/i }));
+      expect(screen.queryByRole("checkbox", { name: /^high availability/i })).not.toBeInTheDocument();
+      expect(screen.getAllByText(/it's a kubernetes node/i)).toHaveLength(6);
+
+      const storagePanel = screen.getByRole("group", { name: "kubernetes storage" });
+      expect(storagePanel).toHaveTextContent(/3 control planes, 3 workers/);
+      expect(within(storagePanel).getByRole("checkbox", { name: /^persistent volumes on ceph/i })).toBeChecked();
+      // the vms sit on local-lvm; the volumes' 200 gb come out of ceph's 1 tb
+      expect(screen.getByRole("figure", { name: /^ceph pool ceph-vm: / })).toHaveTextContent("800 gb free of 1.0 tb");
+      const space = within(storagePanel).getByLabelText(/^space for volumes/i);
+      await user.clear(space);
+      await user.type(space, "500");
+      await waitForSave((s) => s.software.kubernetes.volumeGb === "500");
+      await user.click(within(storagePanel).getByRole("checkbox", { name: /^persistent volumes on ceph/i }));
+      await waitForSave((s) => !s.software.kubernetes.cephVolumes);
+      expect(within(storagePanel).queryByLabelText(/^space for volumes/i)).not.toBeInTheDocument();
+    });
+
+    it("won't preview without space for the volumes", async () => {
+      const user = await renderStep7();
+      await add(user, /^\[?\s*\+ kubernetes/i);
+      await user.selectOptions(within(planner()).getByLabelText(/^control planes/i), "1");
+      await user.selectOptions(within(planner()).getByLabelText(/^workers/i), "0");
+      await user.click(within(planner()).getByRole("button", { name: /add 1 vm/i }));
+      await user.clear(screen.getByLabelText(/^space for volumes/i));
+      await user.click(screen.getByRole("button", { name: /preview/i }));
+      expect(router.push).not.toHaveBeenCalled();
+      expect(screen.getByRole("alert")).toHaveTextContent(/space for volumes/i);
+    });
+
+    it("points to other volume storage when step 4 builds no ceph", async () => {
+      const user = await renderStep7({ clusterStorage: { ceph: false, zfs: false } });
+      await add(user, /^\[?\s*\+ kubernetes/i);
+      await user.click(within(planner()).getByRole("button", { name: /add 6 vms/i }));
+      const storagePanel = screen.getByRole("group", { name: "kubernetes storage" });
+      expect(within(storagePanel).queryByRole("checkbox")).not.toBeInTheDocument();
+      expect(storagePanel).toHaveTextContent(/no ceph in step 4/);
+    });
+  });
+
+  it("starts a vm on uefi with a tpm", async () => {
+    const user = await renderStep7();
+    await add(user, /^\[?\s*\+ vm/i);
+    await user.click(screen.getByText("system", { selector: ".pc-guestsec__summary .label" }));
+    expect(screen.getByLabelText(/^bios/i)).toHaveValue("ovmf");
+    expect(screen.getByRole("checkbox", { name: /^tpm 2\.0/i })).toBeChecked();
+    await waitForSave((s) => s.software.guests[0]?.bios === "ovmf" && s.software.guests[0]?.tpm === true);
+  });
+
+  it("removes a guest", async () => {
+    const user = await renderStep7();
+    await add(user, /^\[?\s*\+ vm/i);
+    await user.click(screen.getByRole("button", { name: /^remove vm-01/i }));
+    await waitForSave((s) => s.software.guests.length === 0);
+    expect(screen.getByRole("button", { name: /^\[?\s*skip/i })).toBeInTheDocument();
+  });
+
+  it("offers only the storage the cluster builds, and ha only on shared storage", async () => {
+    const user = await renderStep7();
+    await add(user, /^\[?\s*\+ vm/i);
+    const storage = screen.getByLabelText(/^storage/i) as HTMLSelectElement;
+    expect([...storage.options].map((o) => o.value)).toEqual(["ceph-vm", "local-lvm"]);
+    expect(screen.getByRole("checkbox", { name: /^high availability/i })).toBeInTheDocument();
+
+    await user.selectOptions(storage, "local-lvm");
+    expect(screen.queryByRole("checkbox", { name: /^high availability/i })).not.toBeInTheDocument();
+    expect(screen.getByText(/no high availability — a disk lives on this node only/i)).toBeInTheDocument();
+  });
+
+  // the fixture's nodes are all the default family (SandyBridge) —
+  // the calculated baseline is its qemu type
+  it("defaults the cpu type to step 2's baseline, and offers only what the nodes run", async () => {
+    const user = await renderStep7();
+    await add(user, /^\[?\s*\+ vm/i);
+    await user.click(screen.getByText("cpu", { selector: ".pc-guestsec__summary .label" }));
+    const cpu = screen.getByLabelText(/^cpu type/i) as HTMLSelectElement;
+    expect(cpu.value).toBe("");
+    expect(cpu.selectedOptions[0].textContent).toMatch(/^SandyBridge-IBRS — the cluster's baseline/);
+    const values = [...cpu.options].map((o) => o.value);
+    // nothing newer than the nodes' own cpu, and no amd-only model
+    expect(values).not.toContain("Skylake-Server");
+    expect(values).not.toContain("EPYC-Rome");
+    expect(values).toContain("x86-64-v2-AES");
+    // identical nodes: passing the host cpu through still migrates
+    expect(values).toContain("host");
+    // a newer generation than the nodes' own is never offered
+    expect(values).not.toContain("IvyBridge");
+  });
+
+  it("holds a guest to options its disks and nics can take", async () => {
+    const user = await renderStep7();
+    await add(user, /^\[?\s*\+ vm/i);
+    // io thread and ssd emulation on scsi (single controller), neither on virtio's ssd
+    expect(screen.getByRole("checkbox", { name: /^io thread/i })).toBeChecked();
+    await user.selectOptions(screen.getByLabelText(/^bus/i), "virtio");
+    expect(screen.queryByRole("checkbox", { name: /^ssd emulation/i })).not.toBeInTheDocument();
+    await user.selectOptions(screen.getByLabelText(/^bus/i), "sata");
+    expect(screen.queryByRole("checkbox", { name: /^io thread/i })).not.toBeInTheDocument();
+    await waitForSave((s) => s.software.guests[0]?.disks[0]?.bus === "sata" && !s.software.guests[0]?.disks[0]?.iothread);
+  });
+
+  it("adds and removes disks and network devices", async () => {
+    const user = await renderStep7();
+    await add(user, /^\[?\s*\+ vm/i);
+    await user.click(screen.getByRole("button", { name: /^\[?\s*\+ disk/i }));
+    await user.click(screen.getByRole("button", { name: /^\[?\s*\+ network device/i }));
+    await waitForSave((s) => s.software.guests[0]?.disks.length === 2 && s.software.guests[0]?.nics.length === 2);
+    await user.click(screen.getByRole("button", { name: /^remove disk 2/i }));
+    await user.click(screen.getByRole("button", { name: /^remove nic 2/i }));
+    await waitForSave((s) => s.software.guests[0]?.disks.length === 1 && s.software.guests[0]?.nics.length === 1);
+  });
+
+  it("gives a container mount points, and keyctl only while unprivileged", async () => {
+    const user = await renderStep7();
+    await add(user, /^\[?\s*\+ container/i);
+    await user.click(screen.getByRole("button", { name: /^\[?\s*\+ mount point/i }));
+    expect(screen.getByLabelText(/^path/i)).toHaveValue("/mnt/data1");
+    await user.click(screen.getByText("container", { selector: ".pc-guestsec__summary .label" }));
+    expect(screen.getByRole("checkbox", { name: /^keyctl/i })).toBeInTheDocument();
+    await user.click(screen.getByRole("checkbox", { name: /^unprivileged/i }));
+    expect(screen.queryByRole("checkbox", { name: /^keyctl/i })).not.toBeInTheDocument();
+  });
+
+  // an iso install sets its own address and users
+  it("asks an iso vm for no address and no login", async () => {
+    const user = await renderStep7();
+    await add(user, /^\[?\s*\+ vm/i);
+    expect(screen.getByRole("radio", { name: /^static/i })).toBeInTheDocument();
+    await user.selectOptions(screen.getByLabelText(/^image/i), "iso");
+    expect(screen.queryByRole("radio", { name: /^static/i })).not.toBeInTheDocument();
+    expect(screen.getByText(/its address is set in its own installer/i)).toBeInTheDocument();
+  });
+
+  it("won't take windows 11 without uefi and a tpm", async () => {
+    const user = await renderStep7();
+    await add(user, /^\[?\s*\+ vm/i);
+    await user.click(screen.getByText("system", { selector: ".pc-guestsec__summary .label" }));
+    await user.selectOptions(screen.getByLabelText(/^guest os/i), "win11");
+    // the defaults already are
+    expect(screen.queryByText(/windows 11 needs/i)).not.toBeInTheDocument();
+    await user.selectOptions(screen.getByLabelText(/^bios/i), "seabios");
+    expect(screen.getByText(/windows 11 needs uefi/i)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /preview/i }));
+    expect(router.push).not.toHaveBeenCalled();
+    await user.selectOptions(screen.getByLabelText(/^bios/i), "ovmf");
+    await user.click(screen.getByRole("checkbox", { name: /^tpm 2\.0/i }));
+    expect(screen.getAllByText(/windows 11 needs a tpm/i).length).toBeGreaterThan(0);
+    await user.click(screen.getByRole("checkbox", { name: /^tpm 2\.0/i }));
+    expect(screen.queryByText(/windows 11 needs/i)).not.toBeInTheDocument();
+  });
+
+  it("won't preview a guest with problems, and lists them", async () => {
+    const user = await renderStep7();
+    await add(user, /^\[?\s*\+ vm/i);
+    await add(user, /^\[?\s*\+ vm/i);
+    const names = screen.getAllByLabelText(/^name/i);
+    await user.clear(names[1]);
+    await user.type(names[1], "vm-01");
+    await user.click(screen.getByRole("button", { name: /preview/i }));
+    expect(router.push).not.toHaveBeenCalled();
+    expect(screen.getByRole("alert")).toHaveTextContent(/another guest has this name/i);
+  });
+
+  it("asks for an address only once it's static", async () => {
+    const user = await renderStep7();
+    await add(user, /^\[?\s*\+ container/i);
+    expect(screen.queryByLabelText(/^static ip/i)).not.toBeInTheDocument();
+    await user.click(screen.getByRole("radio", { name: /^static/i }));
+    await user.type(screen.getByLabelText(/^static ip/i), "10.0.0.60/24");
+    await waitForSave((s) => s.software.guests[0]?.nics[0]?.ipMode === "static" && s.software.guests[0]?.nics[0]?.ip === "10.0.0.60/24");
+  });
+
+  // proxmox 2 + ceph (one osd + monitor) 5 gib of 64, before any guest
+  it("shows the room left on every node, live", async () => {
+    const user = await renderStep7();
+    const memory = () => screen.getAllByRole("figure", { name: /^memory: / });
+    expect(memory()).toHaveLength(3);
+    expect(memory()[0]).toHaveTextContent("57 gib free of 64 gib");
+    expect(screen.getByRole("figure", { name: /^ceph pool ceph-vm: / })).toBeInTheDocument();
+
+    await add(user, /^\[?\s*\+ vm/i);
+    // the new vm's 4 gib lands on node 1 only
+    expect(memory()[0]).toHaveTextContent("53 gib free of 64 gib");
+    expect(memory()[1]).toHaveTextContent("57 gib free of 64 gib");
+  });
+
+  it("shows how far a node is overcommitted", async () => {
+    const user = await renderStep7();
+    await add(user, /^\[?\s*\+ vm/i);
+    const memoryField = screen.getByLabelText(/^memory \(gib\)/i);
+    await user.clear(memoryField);
+    await user.type(memoryField, "80");
+    expect(screen.getAllByRole("figure", { name: /^memory: / })[0]).toHaveTextContent("23 gib over");
+  });
+
+  it("warns when a node's guests want more memory than it has", async () => {
+    const user = await renderStep7();
+    await add(user, /^\[?\s*\+ vm/i);
+    const memory = screen.getByLabelText(/^memory \(gib\)/i);
+    await user.clear(memory);
+    await user.type(memory, "80");
+    expect(screen.getByText(/ask for 80 gib of memory, but it has 64 gib/i)).toBeInTheDocument();
+  });
+
+  it("goes back to access", async () => {
+    const user = await renderStep7();
+    await user.click(screen.getByRole("button", { name: /^\[?\s*back/i }));
+    expect(await screen.findByRole("heading", { name: "access" })).toBeInTheDocument();
+  });
+});
+
+describe("step 8 — install", () => {
+  async function renderStep8(overrides: Partial<PersistedState> = {}) {
+    await savePersistedState(
+      persistedState({ currentStep: "install", nodes: cluster(3, { ramGb: "64", bootDiskSizeGb: "512" }), ...overrides }),
+    );
+    render(<Setup />);
+    await screen.findByRole("heading", { name: "install" });
+  }
+
+  it("offers each node's answer file, with its hash and the keys", async () => {
+    await renderStep8({ hostnameSuffix: "lab.lan" });
+    expect(screen.getByText("# step 8 of 8")).toBeInTheDocument();
+    const links = await screen.findAllByRole("link", { name: /^\[\s*answer-.*\.toml\s*\]$/ }, { timeout: 5000 });
+    expect(links.map((l) => l.getAttribute("download"))).toEqual(["answer-pve01.toml", "answer-pve02.toml", "answer-pve03.toml"]);
+    const href = links[1].getAttribute("href") ?? "";
+    const toml = decodeURIComponent(href.slice(href.indexOf(",") + 1));
+    expect(toml).toContain('fqdn = "pve02.lab.lan"');
+    expect(toml).toMatch(/root-password-hashed = "\$6\$/);
+    expect(toml).toContain(ED25519_KEY);
+    expect(toml).toContain('keyboard = "de"');
+  });
+
+  // nothing to fix here — so the earlier steps' problems are listed up front
+  it("holds the files back, listing what an earlier step still needs", async () => {
+    await renderStep8({ access: accessPlan({ rootPasswords: ["long-enough-pw-1", "", "long-enough-pw-3"] }) });
+    expect(screen.getByRole("alert")).toHaveTextContent(/step access/i);
+    expect(screen.getByText(/fix the problems listed below first/i)).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /answer-.*\.toml/ })).not.toBeInTheDocument();
+  });
+
+  it("goes back to software", async () => {
+    await renderStep8();
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: /^\[?\s*back/i }));
+    expect(await screen.findByRole("heading", { name: "software" })).toBeInTheDocument();
+  });
+});

@@ -1,4 +1,4 @@
-// Step 3's logic: which disks can play which role, what the resulting
+// Step 4's logic: which disks can play which role, what the resulting
 // pools actually hold, and the advice worth giving before someone builds
 // a layout they'll have to destroy to change.
 //
@@ -44,14 +44,14 @@ const ROLE_INFO: Record<DiskRole, DiskRoleInfo> = {
   unused: {
     value: "unused",
     label: "leave unused",
-    hint: "declared in step 1 but left out of every pool — proxmox won't touch it",
+    hint: "declared in step 2 but left out of every pool — proxmox won't touch it",
   },
 };
 
 /**
  * A node's only spare disk, with exactly one cluster storage mode on,
  * has to go to that mode — left out, the node would contribute nothing to
- * the storage chosen in step 2. With both modes on every node has two
+ * the storage chosen in step 3. With both modes on every node has two
  * disks or more (see effectiveClusterStorage), so nothing is forced.
  */
 export function soleDiskMode(modes: StorageMode[], diskCount: number): StorageMode | null {
@@ -243,7 +243,7 @@ export function poolMembershipHint(nodes: NodeInfo[], mode: StorageMode): Hint |
     return {
       tone: "danger",
       glyph: "✗",
-      text: `no disk anywhere in the cluster is assigned to ${label} — pick at least one on every node, or go back and untick it in step 2.`,
+      text: `no disk anywhere in the cluster is assigned to ${label} — pick at least one on every node, or go back and untick it in step 3.`,
     };
   }
   if (contributing < nodes.length) {
@@ -300,7 +300,7 @@ export function minReplicaChoices(replicas: number): number[] {
  * Read-side only, like effectiveStorageHaMode — the stored choice is never
  * overwritten. The wizard starts at one node, so writing a clamped value
  * back would turn ceph's default of 3 into the floor before the visitor
- * ever reached step 2, and it would never come back. Kept as the choice
+ * ever reached step 3, and it would never come back. Kept as the choice
  * instead, it re-applies itself as soon as there are nodes enough.
  * Returns the same object when nothing needs clamping.
  */
@@ -453,4 +453,17 @@ export function validatePoolName(value: string): string | null {
     return `"${value}" is reserved by zfs — pick another name`;
   }
   return null;
+}
+
+/**
+ * How the installer carves the boot disk (ext4 on lvm, its defaults): a
+ * root filesystem of a quarter of the disk up to 96 gb, swap the size of
+ * ram between 4 and 8 gb, an eighth kept free up to 16 gb — and the rest
+ * becomes local-lvm, the thin pool guests can live on.
+ */
+export function bootDiskLayout(bootGb: number, ramGb: number) {
+  const root = Math.min(bootGb / 4, 96);
+  const swap = Math.min(Math.max(ramGb || 8, 4), 8);
+  const reserved = Math.min(bootGb / 8, 16);
+  return { root, swap, reserved, localLvm: Math.max(0, bootGb - root - swap - reserved) };
 }

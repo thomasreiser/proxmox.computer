@@ -12,7 +12,7 @@ export const MAX_NICS_PER_NODE = 8;
 export type CpuVendor = "intel" | "amd";
 export type DiskType = "nvme" | "ssd" | "hdd";
 export type NicSpeed = "1gbe" | "2.5gbe" | "10gbe" | "25gbe" | "other";
-export type WizardStepId = "hardware" | "network" | "storage" | "backups";
+export type WizardStepId = "location" | "hardware" | "network" | "storage" | "backups" | "access" | "software" | "install";
 
 // The physical connector — what the switch port has to match. Speed alone
 // doesn't settle it: 10 gbe is either sfp+ or rj45 (10gbase-t), which need
@@ -30,11 +30,11 @@ export interface NicInfo {
 
 // What one disk beyond the boot disk is actually for. This lives on the
 // disk rather than in a parallel array on the node, so adding or removing
-// a disk back in step 1 can't shift every later disk's plan by one.
+// a disk back in step 2 can't shift every later disk's plan by one.
 //   "ceph"   — handed to ceph whole, as one osd
 //   "zfs"    — a member of this node's replicated zfs pool
 //   "local"  — this node's own storage, replicated nowhere
-//   "unused" — declared in step 1, deliberately left out of every pool
+//   "unused" — declared in step 2, deliberately left out of every pool
 export type DiskRole = "ceph" | "zfs" | "local" | "unused";
 
 export interface AdditionalDisk {
@@ -144,7 +144,7 @@ export interface LocalPlan {
   name: string;
 }
 
-// Step 3's cluster-wide answers. Which disks take part is decided per
+// Step 4's cluster-wide answers. Which disks take part is decided per
 // node (see AdditionalDisk.role); everything here is one decision for the
 // whole cluster.
 // Where the cluster's guests are backed up to.
@@ -154,7 +154,7 @@ export interface LocalPlan {
 //   "none"         — no backups at all
 export type BackupTarget = "pbs-external" | "pbs-vm" | "nfs" | "none";
 
-// Step 4's answers. Every field is kept whatever the target, so switching
+// Step 5's answers. Every field is kept whatever the target, so switching
 // target and back doesn't lose what was typed — each target only reads
 // the fields it needs (see backups.ts).
 export interface BackupPlan {
@@ -445,15 +445,68 @@ export function nicSpeedLabel(speed: NicSpeed): string {
   return nicSpeedOptions.find((o) => o.value === speed)?.label ?? speed;
 }
 
-// bump this whenever the shape of PersistedState (or anything nested inside
-// it) changes — a mismatched version is discarded wholesale rather than
-// risking a crash or a half-applied state from an older save.
-export const STORAGE_KEY = "proxmox-computer:setup-wizard";
-export const STORAGE_VERSION = 14;
+import type { LocationPlan } from "./location";
+import type { SoftwarePlan } from "./software";
+export { STORAGE_KEY } from "./vault";
+
+// the steps whose answers are saved — step 8, install, asks nothing
+export type SavedStepId = Exclude<WizardStepId, "install">;
+export const SAVED_STEPS: SavedStepId[] = ["location", "hardware", "network", "storage", "backups", "access", "software"];
+
+// One version per step. Bump a step's whenever the shape of what it saves
+// changes (see STEP_SECTIONS for which fields those are). A save is kept up
+// to the first step whose version or shape doesn't match; that step and
+// every one after it start over, since each builds on the ones before —
+// never migrated, never half-applied (see restoreSaved in saved-state.ts).
+export const STEP_VERSIONS: Record<SavedStepId, number> = {
+  location: 1,
+  hardware: 1,
+  network: 1,
+  storage: 1,
+  backups: 1,
+  access: 1,
+  software: 1,
+};
+
+// The layout of the save itself: which fields belong to which step, and
+// stepVersions. Bump it only when that changes — it discards a save wholesale.
+export const STORAGE_VERSION = 20;
+
+// Step 6: who gets in, and how. The one step that holds secrets — which
+// is why the whole saved state is encrypted (see vault.ts).
+export type OidcUsernameClaim = "subject" | "username" | "email";
+
+export interface OidcPlan {
+  enabled: boolean;
+  // the proxmox realm id people pick at login, e.g. "oidc"
+  realm: string;
+  issuerUrl: string;
+  clientId: string;
+  // optional — a public client has none. a secret.
+  clientSecret: string;
+  usernameClaim: OidcUsernameClaim;
+  // create a proxmox user on first login (with no permissions until granted)
+  autocreate: boolean;
+  // preselect this realm on the login screen
+  isDefault: boolean;
+}
+
+export interface AccessPlan {
+  // one or more ssh public keys, one per line — root on every node
+  sshKeys: string;
+  // ssh takes keys only; the web ui and console still take the password
+  disablePasswordSsh: boolean;
+  // per node, by index — secrets. read past the end as "" (see rootPasswordFor)
+  rootPasswords: string[];
+  oidc: OidcPlan;
+}
 
 export interface PersistedState {
   version: number;
+  // the STEP_VERSIONS each step was saved under
+  stepVersions: Record<SavedStepId, number>;
   currentStep: WizardStepId;
+  location: LocationPlan;
   nodeCount: string;
   hostnameSuffix: string;
   globalCidr: string;
@@ -473,115 +526,143 @@ export interface PersistedState {
   // identicalNetwork strikes for bridges
   identicalStorage: boolean;
   backups: BackupPlan;
+  access: AccessPlan;
+  software: SoftwarePlan;
 }
 
-// deliberately not exhaustive — every individual field getting checked would
-// make this as brittle as the state it's guarding. the version check above
-// is the real defense against a shape change; this just catches obviously
-// corrupt or hand-edited data within the same version before it ever
-// reaches setState.
-export function isPersistedState(value: unknown): value is PersistedState {
+function isSoftwarePlan(value: unknown): value is SoftwarePlan {
   if (!value || typeof value !== "object") return false;
-  const v = value as Record<string, unknown>;
-  if (v.version !== STORAGE_VERSION) return false;
-  if (!["hardware", "network", "storage", "backups"].includes(v.currentStep as string)) return false;
-  if (typeof v.nodeCount !== "string") return false;
-  if (typeof v.hostnameSuffix !== "string") return false;
-  if (typeof v.globalCidr !== "string") return false;
-  if (typeof v.gateway !== "string") return false;
-  if (typeof v.dns !== "string") return false;
-  if (typeof v.homelabVlan !== "string") return false;
-  if (typeof v.identicalHardware !== "boolean") return false;
-  if (typeof v.identicalNetwork !== "boolean") return false;
-  if (typeof v.identicalStorage !== "boolean") return false;
-  if (!v.backups || typeof v.backups !== "object") return false;
-  const backups = v.backups as Record<string, unknown>;
-  if (!["pbs-external", "pbs-vm", "nfs", "none"].includes(backups.target as string)) return false;
-  for (const key of ["pbsAddress", "datastore", "nfsServer", "nfsExport", "schedule", "keepLast", "keepDaily", "keepWeekly", "keepMonthly", "offsiteAddress"]) {
-    if (typeof backups[key] !== "string") return false;
-  }
-  for (const key of ["encrypt", "verify", "offsite"]) {
-    if (typeof backups[key] !== "boolean") return false;
-  }
-  if (!v.storage || typeof v.storage !== "object") return false;
-  const storage = v.storage as Record<string, unknown>;
-  for (const section of ["ceph", "zfs", "local"]) {
-    if (!storage[section] || typeof storage[section] !== "object") return false;
-  }
-  if (!v.clusterStorage || typeof v.clusterStorage !== "object") return false;
-  const cs = v.clusterStorage as Record<string, unknown>;
-  if (typeof cs.ceph !== "boolean" || typeof cs.zfs !== "boolean") return false;
-  if (!Array.isArray(v.nodes)) return false;
-
-  for (const node of v.nodes) {
-    if (!node || typeof node !== "object") return false;
-    const n = node as Record<string, unknown>;
-    if (typeof n.name !== "string") return false;
-    if (typeof n.cpuVendor !== "string") return false;
-    if (typeof n.cpuFamily !== "string") return false;
-    if (!Array.isArray(n.nics)) return false;
-    for (const nic of n.nics as Record<string, unknown>[]) {
-      if (!nic || typeof nic.speed !== "string" || typeof nic.port !== "string") return false;
+  const guests = (value as Record<string, unknown>).guests;
+  if (!Array.isArray(guests)) return false;
+  const k8s = (value as Record<string, unknown>).kubernetes as Record<string, unknown> | undefined;
+  if (!k8s || typeof k8s !== "object" || typeof k8s.cephVolumes !== "boolean" || typeof k8s.volumeGb !== "string") return false;
+  const fields = (o: Record<string, unknown>, strings: string[], booleans: string[]) =>
+    strings.every((k) => typeof o[k] === "string") && booleans.every((k) => typeof o[k] === "boolean");
+  return guests.every((g) => {
+    if (!g || typeof g !== "object") return false;
+    const guest = g as Record<string, unknown>;
+    if (!["vm", "container"].includes(guest.kind as string)) return false;
+    if (!["", "control-plane", "worker"].includes(guest.k8sRole as string)) return false;
+    if (
+      !fields(
+        guest,
+        ["id", "name", "vmid", "image", "tags", "notes", "node", "startupOrder", "startupDelay", "shutdownTimeout", "sockets", "cores",
+          "cpuType", "cpuLimit", "cpuUnits", "memoryGb", "minMemoryGb", "swapGb", "osType", "machine", "bios", "scsiController",
+          "display", "ciUser"],
+        ["ha", "startOnBoot", "numa", "ballooning", "tpm", "qemuAgent", "unprivileged", "nesting", "fuse", "keyctl", "useAccessKeys"],
+      )
+    ) {
+      return false;
     }
-    if (!Array.isArray(n.additionalDisks)) return false;
-
-    if (!n.network || typeof n.network !== "object") return false;
-    const net = n.network as Record<string, unknown>;
-    if (typeof net.hostLabel !== "string") return false;
-    if (typeof net.cidr !== "string") return false;
-    if (typeof net.managementInterfaceId !== "string") return false;
-    if (!Array.isArray(net.bonds)) return false;
-    if (!net.bridgeCounts || typeof net.bridgeCounts !== "object") return false;
-    if (!net.bridges || typeof net.bridges !== "object") return false;
-    for (const b of Object.values(net.bridges as Record<string, unknown>)) {
-      if (!b || typeof b !== "object") return false;
-      const bridge = b as Record<string, unknown>;
-      if (typeof bridge.enabled !== "boolean") return false;
-      if (typeof bridge.name !== "string") return false;
-      if (!Array.isArray(bridge.purposes)) return false;
-      if (typeof bridge.ip !== "string") return false;
-      if (typeof bridge.vlanTag !== "string") return false;
-    }
-  }
-
-  return true;
+    if (!Array.isArray(guest.disks) || !Array.isArray(guest.nics)) return false;
+    const diskOk = (d: unknown) =>
+      !!d && typeof d === "object" &&
+      fields(d as Record<string, unknown>, ["id", "storage", "sizeGb", "bus", "cache", "mountPath"], ["discard", "ssd", "iothread", "backup", "replicate"]);
+    const nicOk = (n: unknown) =>
+      !!n && typeof n === "object" &&
+      ["dhcp", "static", "none"].includes((n as Record<string, unknown>).ipMode as string) &&
+      fields(n as Record<string, unknown>, ["id", "bridge", "vlanTag", "model", "macAddress", "rateMbps", "mtu", "ip", "gateway"], ["firewall"]);
+    return guest.disks.every(diskOk) && guest.nics.every(nicOk);
+  });
 }
 
-export function loadPersistedState(): PersistedState | null {
-  try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) return null;
-    const parsed: unknown = JSON.parse(raw);
-    return isPersistedState(parsed) ? parsed : null;
-  } catch {
-    // corrupt json, storage unavailable (private browsing, disabled, etc.),
-    // or anything else — treat exactly like "nothing saved".
-    return null;
-  }
+function isAccessPlan(value: unknown): value is AccessPlan {
+  if (!value || typeof value !== "object") return false;
+  const a = value as Record<string, unknown>;
+  if (typeof a.sshKeys !== "string" || typeof a.disablePasswordSsh !== "boolean") return false;
+  if (!Array.isArray(a.rootPasswords) || !a.rootPasswords.every((p) => typeof p === "string")) return false;
+  if (!a.oidc || typeof a.oidc !== "object") return false;
+  const o = a.oidc as Record<string, unknown>;
+  for (const key of ["realm", "issuerUrl", "clientId", "clientSecret"]) if (typeof o[key] !== "string") return false;
+  for (const key of ["enabled", "autocreate", "isDefault"]) if (typeof o[key] !== "boolean") return false;
+  return ["subject", "username", "email"].includes(o.usernameClaim as string);
 }
 
-// a preview lives on its own route, so "continue to the next step" has to
-// hand the wizard its next step through the same saved state the wizard
-// restores from on mount.
-/**
- * Replaces whatever setup this browser has saved — for reopening one from
- * a file. False when storage is unavailable (private mode, disabled).
- */
-export function replacePersistedState(state: PersistedState): boolean {
-  try {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-    return true;
-  } catch {
-    return false;
-  }
+// Which fields each step saves. Disk roles are step 4's although they sit on
+// step 2's disks, and each node's network is step 3's.
+//   location — location
+//   hardware — nodeCount, identicalHardware, nodes (all but network and disk roles)
+//   network  — hostnameSuffix, globalCidr, gateway, dns, homelabVlan,
+//              identicalNetwork, every node's network
+//   storage  — clusterStorage, storage, identicalStorage, every disk's role
+//   backups, access, software — their own plan
+//
+// Each check is deliberately not exhaustive — every individual field getting
+// checked would make it as brittle as the state it's guarding. The step
+// versions are the real defense against a shape change; these catch
+// obviously corrupt or hand-edited data before it ever reaches setState.
+// A check may rely on the steps before it having passed.
+type Loose = Record<string, unknown>;
+const isObject = (value: unknown): value is Loose => !!value && typeof value === "object";
+const strings = (o: Loose, keys: string[]) => keys.every((k) => typeof o[k] === "string");
+const booleans = (o: Loose, keys: string[]) => keys.every((k) => typeof o[k] === "boolean");
+const nodesOf = (v: Loose) => v.nodes as Loose[];
+
+export const STEP_SECTIONS: Record<SavedStepId, (v: Loose) => boolean> = {
+  location: (v) => isObject(v.location) && strings(v.location, ["country", "keyboard", "timezone"]),
+
+  hardware: (v) =>
+    typeof v.nodeCount === "string" &&
+    typeof v.identicalHardware === "boolean" &&
+    Array.isArray(v.nodes) &&
+    v.nodes.every(
+      (n) =>
+        isObject(n) &&
+        strings(n, ["name", "cpuVendor", "cpuFamily"]) &&
+        Array.isArray(n.nics) &&
+        n.nics.every((nic) => isObject(nic) && strings(nic, ["speed", "port"])) &&
+        Array.isArray(n.additionalDisks) &&
+        n.additionalDisks.every((d) => isObject(d) && strings(d, ["type", "sizeGb", "name"])),
+    ),
+
+  network: (v) =>
+    strings(v, ["hostnameSuffix", "globalCidr", "gateway", "dns", "homelabVlan"]) &&
+    typeof v.identicalNetwork === "boolean" &&
+    nodesOf(v).every((n) => {
+      const net = n.network;
+      if (!isObject(net) || !strings(net, ["hostLabel", "cidr", "managementInterfaceId"])) return false;
+      if (!Array.isArray(net.bonds) || !isObject(net.bridgeCounts) || !isObject(net.bridges)) return false;
+      return Object.values(net.bridges).every(
+        (b) => isObject(b) && booleans(b, ["enabled"]) && strings(b, ["name", "ip", "vlanTag"]) && Array.isArray(b.purposes),
+      );
+    }),
+
+  storage: (v) =>
+    typeof v.identicalStorage === "boolean" &&
+    isObject(v.storage) &&
+    ["ceph", "zfs", "local"].every((section) => isObject((v.storage as Loose)[section])) &&
+    isObject(v.clusterStorage) &&
+    booleans(v.clusterStorage, ["ceph", "zfs"]) &&
+    nodesOf(v).every((n) =>
+      (n.additionalDisks as Loose[]).every((d) => ["", "ceph", "zfs", "local", "unused"].includes(d.role as string)),
+    ),
+
+  backups: (v) =>
+    isObject(v.backups) &&
+    ["pbs-external", "pbs-vm", "nfs", "none"].includes(v.backups.target as string) &&
+    strings(v.backups, ["pbsAddress", "datastore", "nfsServer", "nfsExport", "schedule", "keepLast", "keepDaily", "keepWeekly", "keepMonthly", "offsiteAddress"]) &&
+    booleans(v.backups, ["encrypt", "verify", "offsite"]),
+
+  access: (v) => isAccessPlan(v.access),
+
+  software: (v) => isSoftwarePlan(v.software),
+};
+
+const ALL_STEPS: WizardStepId[] = [...SAVED_STEPS, "install"];
+
+/** a save in this build's layout: the layout version, and a step to reopen on — its steps unchecked */
+export function isSaveLayout(value: unknown): value is Loose {
+  return isObject(value) && value.version === STORAGE_VERSION && ALL_STEPS.includes(value.currentStep as WizardStepId);
 }
 
-export function persistCurrentStep(step: WizardStepId): void {
-  try {
-    const saved = loadPersistedState();
-    if (!saved) return;
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...saved, currentStep: step }));
-  } catch {
-    // storage unavailable — the wizard just reopens on its last saved step.
-  }
+/** the first step a save can't be kept from: another version, or not the shape it should be — null if all hold */
+export function firstStaleStep(value: object): SavedStepId | null {
+  const v = value as Loose;
+  const versions = isObject(v.stepVersions) ? v.stepVersions : {};
+  return SAVED_STEPS.find((step) => versions[step] !== STEP_VERSIONS[step] || !STEP_SECTIONS[step](v)) ?? null;
+}
+
+/** a save this build takes exactly as it is — every step current and well-formed */
+export function isPersistedState(value: unknown): value is PersistedState {
+  return isSaveLayout(value) && firstStaleStep(value) === null;
 }

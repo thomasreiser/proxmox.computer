@@ -1,4 +1,4 @@
-// Step 4's logic: where backups go, how long they're kept, and the advice
+// Step 5's logic: where backups go, how long they're kept, and the advice
 // worth giving before someone relies on a backup plan that wouldn't
 // survive the failure it's meant for.
 
@@ -197,7 +197,7 @@ export function retentionHint(plan: BackupPlan): Hint | null {
   };
 }
 
-/** step 2 asked which nics carry backup traffic */
+/** step 3 asked which nics carry backup traffic */
 export function backupNicHint(nodes: NodeInfo[], target: BackupTarget): Hint | null {
   if (target === "none" || target === "pbs-vm") return null;
   const without = nodes.filter(
@@ -208,7 +208,7 @@ export function backupNicHint(nodes: NodeInfo[], target: BackupTarget): Hint | n
   return {
     tone: "info",
     glyph: "#",
-    text: `no nic on ${names} is set up for backups in step 2, so backup traffic shares the management link. fine for a small cluster — a nightly full run can crowd out the web ui, though.`,
+    text: `no nic on ${names} is set up for backups in step 3, so backup traffic shares the management link. fine for a small cluster — a nightly full run can crowd out the web ui, though.`,
   };
 }
 
@@ -217,7 +217,7 @@ export function backupNicHint(nodes: NodeInfo[], target: BackupTarget): Hint | n
 /**
  * The most guest data the planned storage can hold, in gb — what one full
  * backup of every guest reaches once every pool is full. Read through the
- * same effective values step 3 shows:
+ * same effective values step 4 shows:
  * - ceph counts once, after replicas: it's one pool however many nodes;
  * - zfs replication counts one node's pool (the largest): replication
  *   keeps the same guests on every node, so they're backed up once;

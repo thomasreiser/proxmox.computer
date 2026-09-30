@@ -9,13 +9,14 @@ import { expect } from "vitest";
 import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import Setup from "./page";
-import { STORAGE_KEY, persistCurrentStep, type PersistedState } from "./wizard-state";
+import { STORAGE_KEY, type PersistedState } from "./wizard-state";
+import { loadPersistedState, persistCurrentStep } from "./saved-state";
 
 export type User = ReturnType<typeof userEvent.setup>;
 
-export function saved(): PersistedState | null {
-  const raw = window.localStorage.getItem(STORAGE_KEY);
-  return raw ? (JSON.parse(raw) as PersistedState) : null;
+/** the saved setup, decrypted with the test session's key */
+export function saved(): Promise<PersistedState | null> {
+  return loadPersistedState();
 }
 
 /**
@@ -26,8 +27,8 @@ export function saved(): PersistedState | null {
  */
 export function waitForSave(predicate: (state: PersistedState) => boolean) {
   return waitFor(
-    () => {
-      const state = saved();
+    async () => {
+      const state = await saved();
       expect(state).not.toBeNull();
       expect(predicate(state as PersistedState)).toBe(true);
     },
@@ -51,9 +52,9 @@ export async function setNodeCount(user: User, count: string) {
 }
 
 /**
- * Fills step 1's required fields that start blank — memory, boot disk
+ * Fills step 2's required fields that start blank — memory, boot disk
  * size, and any spare disk's size — on every node's form. A fresh node
- * can't pass step 1's gate without them, which is the point of the gate.
+ * can't pass step 2's gate without them, which is the point of the gate.
  */
 export async function fillRequiredHardware(user: User) {
   const fill = async (label: RegExp, value: string) => {
@@ -67,9 +68,9 @@ export async function fillRequiredHardware(user: User) {
 }
 
 /**
- * Fills every empty address field on step 2 with the example its
+ * Fills every empty address field on step 3 with the example its
  * placeholder suggests ("e.g. 10.0.20.0/24") — what a visitor does to get
- * past step 2's gate without planning their own subnets.
+ * past step 3's gate without planning their own subnets.
  */
 export async function fillRequiredNetwork(user: User) {
   const empty = () =>
@@ -85,23 +86,36 @@ export async function fillRequiredNetwork(user: User) {
 }
 
 /**
- * Renders the wizard already on step 2.
+ * Opens a fresh wizard and moves past step 1, location, the way a visitor
+ * does — its defaults (from the test browser: en-US, UTC) are complete, so
+ * "next" goes straight on to hardware.
+ */
+export async function renderAtHardwareStep() {
+  const user = userEvent.setup();
+  const view = render(<Setup />);
+  await screen.findByRole("heading", { name: "location" });
+  await user.click(screen.getByRole("button", { name: /^\[?\s*next/i }));
+  await screen.findByRole("heading", { name: "hardware" });
+  return { user, ...view };
+}
+
+/**
+ * Renders the wizard already on step 3.
  *
- * In the app you never click straight from hardware to network: step 1
+ * In the app you never click straight from hardware to network: step 2
  * hands off to /setup/preview/hardware, and that route calls
- * persistCurrentStep("network") before sending you back here. This walks
- * the same path — fill step 1 in through the form, persist the next step
+ * await persistCurrentStep("network") before sending you back here. This walks
+ * the same path — fill step 2 in through the form, persist the next step
  * the way the preview route does, remount — so the test exercises the real
  * hand-off rather than reaching into component state.
  */
 export async function renderAtNetworkStep(opts: { nodeCount?: string; onHardware?: (user: User) => Promise<void> } = {}) {
-  const user = userEvent.setup();
-  const first = render(<Setup />);
+  const { user, ...first } = await renderAtHardwareStep();
   if (opts.nodeCount) {
     await setNodeCount(user, opts.nodeCount);
     await waitForSave((state) => state.nodeCount === opts.nodeCount);
   }
-  // step 1 has to be complete, as it would be for a visitor who got past
+  // step 2 has to be complete, as it would be for a visitor who got past
   // its gate — after onHardware, so any disks it adds get sizes too.
   // persistCurrentStep reads localStorage back, so the hand-off waits for
   // the 300ms autosave to actually flush these edits — a "some state
@@ -117,7 +131,7 @@ export async function renderAtNetworkStep(opts: { nodeCount?: string; onHardware
   // even with no edits at all, the first autosave still has to land before
   // the hand-off can read a state back out
   await waitForSave(() => true);
-  persistCurrentStep("network");
+  await persistCurrentStep("network");
   first.unmount();
 
   render(<Setup />);
@@ -126,8 +140,8 @@ export async function renderAtNetworkStep(opts: { nodeCount?: string; onHardware
 }
 
 /**
- * Renders the wizard on step 3, the same way: step 2 hands off through
- * /setup/preview/network. `onNetwork` runs while step 2 is on screen, for
+ * Renders the wizard on step 4, the same way: step 3 hands off through
+ * /setup/preview/network. `onNetwork` runs while step 3 is on screen, for
  * the tests that need a particular cluster storage mode first.
  */
 export async function renderAtStorageStep(opts: {
@@ -136,7 +150,7 @@ export async function renderAtStorageStep(opts: {
   onNetwork?: (user: User) => Promise<void>;
 } = {}) {
   const user = await renderAtNetworkStep({ nodeCount: opts.nodeCount, onHardware: opts.onHardware });
-  // step 2 complete too, as it is for a visitor who got past its gate —
+  // step 3 complete too, as it is for a visitor who got past its gate —
   // after onNetwork, since its storage choice can add address fields
   const before = window.localStorage.getItem(STORAGE_KEY);
   await opts.onNetwork?.(user);
@@ -145,7 +159,7 @@ export async function renderAtStorageStep(opts: {
     timeout: SAVE_TIMEOUT,
   });
   await waitForSave(() => true);
-  persistCurrentStep("storage");
+  await persistCurrentStep("storage");
 
   // remounting in place — the step-2 tree is still up, so it has to go
   cleanup();
@@ -195,7 +209,7 @@ export function storageCheckbox(mode: "ceph" | "zfs"): HTMLInputElement {
 }
 
 /**
- * Sets step 2's cluster storage to exactly this — ceph and zfs are
+ * Sets step 3's cluster storage to exactly this — ceph and zfs are
  * independent checkboxes, so e.g. "zfs only" means unticking ceph as well
  * as ticking zfs. zfs is set after ceph so it's never blocked by a ceph
  * that's about to be unticked.
@@ -207,14 +221,14 @@ export async function chooseClusterStorage(user: User, want: { ceph: boolean; zf
 }
 
 /**
- * Renders the wizard on step 4 the long way: through steps 1–3 and each
- * hand-off, as a visitor would. Slow — most step 4 tests restore a
- * complete save at step 4 instead; this one proves the path exists.
+ * Renders the wizard on step 4 the long way: through steps 1–4 and each
+ * hand-off, as a visitor would. Slow — most step 5 tests restore a
+ * complete save at step 5 instead; this one proves the path exists.
  */
 export async function renderAtBackupsStep() {
   const user = await renderAtStorageStep();
   await waitForSave(() => true);
-  persistCurrentStep("backups");
+  await persistCurrentStep("backups");
   cleanup();
   render(<Setup />);
   expect(await screen.findByRole("heading", { name: "backups" })).toBeInTheDocument();

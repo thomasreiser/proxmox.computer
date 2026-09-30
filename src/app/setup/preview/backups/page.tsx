@@ -12,11 +12,13 @@ import {
   useReactFlow,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { loadPersistedState, type PersistedState } from "../../wizard-state";
+import { useRouter } from "next/navigation";
+import { type PersistedState } from "../../wizard-state";
+import { loadPersistedState, persistCurrentStep } from "../../saved-state";
+import { VaultGate } from "../../vault-gate";
 import { backupTargetLabel, maxBackupsKept, retentionReach } from "../../backups";
 import { problemsUpTo } from "../../step-checks";
 import { ProblemList } from "../../problem-list";
-import { answerFileName, buildAnswerToml, tomlDataUrl, DISK_PLACEHOLDER, type AnswerContext } from "../../answer-file";
 import { buildBackupOverview, type BackupOverview } from "./plan";
 import { BackupNodeCard } from "./node-card";
 import { BackupTargetNode, OffsiteNode } from "./target-node";
@@ -85,73 +87,27 @@ function BackupCanvas({ overview, hydrated, hasSaved }: { overview: BackupOvervi
   );
 }
 
-// Steps 1–4 are everything an install needs, so the answer files can be
-// had here, before step 5 exists. Each is a data: link — no server, and
-// nothing leaves the browser.
-function AnswerFiles({ state, ctx, blocked }: { state: PersistedState; ctx: AnswerContext; blocked: boolean }) {
-  const nodes = state.nodes;
+export default function BackupsPreview() {
   return (
-    <section className="flex flex-col border border-border bg-surface-100 p-5" style={{ gap: "var(--space-3)" }}>
-      <p className="label text-ink-muted">ready to install — or keep going</p>
-      <p className="body-sm text-ink-muted">
-        Steps 1–4 are everything an install needs, so you can stop here: take
-        one <span className="code">answer.toml</span> per node, bake it into
-        the proxmox iso, and each node installs itself, reachable at the
-        address from step 2. Or carry on to step 5 and pick the software to
-        run on the cluster — that step is optional, and you can add it later
-        (it isn&apos;t built yet).
-      </p>
-      <p className="body-sm text-ink-muted">
-        Before you build an iso, open its file and do the two things it
-        can&apos;t: add a root password, and replace{" "}
-        <span className="code">{DISK_PLACEHOLDER}</span> with the boot disk —
-        the wizard never names a device, and the installer wipes whatever it
-        points at, so until you change it the install stops instead of
-        guessing. Every file also carries the whole setup: to change anything
-        later, pick &quot;adjust a setup&quot; on the start page and hand it
-        any one of them.
-      </p>
-      {blocked && <p className="body-sm pc-field__hint">fix the problems listed below first</p>}
-      <div className="flex flex-wrap" style={{ gap: "var(--space-2)" }}>
-        {nodes.map((node, i) => {
-          const fileName = answerFileName(node);
-          return blocked ? (
-            <button key={i} type="button" className="pc-btn" disabled>
-              <span className="pc-btn__bracket">[</span>
-              {fileName}
-              <span className="pc-btn__bracket">]</span>
-            </button>
-          ) : (
-            <a key={i} className="pc-btn" href={tomlDataUrl(buildAnswerToml(node, ctx, state))} download={fileName}>
-              <span className="pc-btn__bracket">[</span>
-              {fileName}
-              <span className="pc-btn__bracket">]</span>
-            </a>
-          );
-        })}
-      </div>
-    </section>
+    <VaultGate mode="preview">
+      <BackupsPreviewPage />
+    </VaultGate>
   );
 }
 
-export default function BackupsPreview() {
+function BackupsPreviewPage() {
+  const router = useRouter();
   const [saved, setSaved] = useState<PersistedState | null>(null);
   const [hydrated, setHydrated] = useState(false);
-  // the browser's own timezone and locale seed the answer files' keyboard,
-  // country and timezone — read after mount, like the save, so the static
-  // prerender never disagrees with the client
-  const [browser, setBrowser] = useState({ timezone: "UTC", locale: "en-US" });
 
-  /* eslint-disable react-hooks/set-state-in-effect */
+   
   useEffect(() => {
-    setSaved(loadPersistedState());
-    setBrowser({
-      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
-      locale: navigator.language || "en-US",
+    void loadPersistedState().then((state) => {
+      setSaved(state);
+      setHydrated(true);
     });
-    setHydrated(true);
   }, []);
-  /* eslint-enable react-hooks/set-state-in-effect */
+   
 
   const overview = useMemo(
     () =>
@@ -162,6 +118,11 @@ export default function BackupsPreview() {
   );
   const blocking = useMemo(() => (saved ? problemsUpTo("backups", saved) : []), [saved]);
   const shared = overview.nodes.filter((n) => !n.link.dedicated).length;
+
+  function goToAccess() {
+    if (blocking.length > 0) return;
+    void persistCurrentStep("access").then(() => router.push("/setup"));
+  }
 
   return (
     <div className="pc-root flex min-h-full flex-col">
@@ -182,102 +143,103 @@ export default function BackupsPreview() {
       </header>
 
       <main className="flex-1 px-6 py-12">
-        <div className="mx-auto flex max-w-6xl flex-col" style={{ gap: "var(--space-5)" }}>
-          <div>
-            <p className="meta pc-stepflow__meta"># step 4 of 5 — preview</p>
-            <h2 className="h2 pc-stepflow__title">backups</h2>
-            <p className="body pc-stepflow__intro">
-              Where every node&apos;s backups go. A solid cyan cable runs over
-              the link step 2 set aside for backups; a dashed one shares the
-              management link. With an off-site copy, the dashed pink line
-              below the target is pbs&apos;s sync job pulling the whole
-              datastore somewhere else.
-            </p>
+        {/* nothing until the saved setup is decrypted — no flash of an empty preview */}
+        {hydrated && (
+          <div className="mx-auto flex max-w-6xl flex-col" style={{ gap: "var(--space-5)" }}>
+            <div>
+              <p className="meta pc-stepflow__meta"># step 5 of 8 — preview</p>
+              <h2 className="h2 pc-stepflow__title">backups</h2>
+              <p className="body pc-stepflow__intro">
+                Where every node&apos;s backups go. A solid cyan cable runs over
+                the link step 3 set aside for backups; a dashed one shares the
+                management link. With an off-site copy, the dashed pink line
+                below the target is pbs&apos;s sync job pulling the whole
+                datastore somewhere else.
+              </p>
+            </div>
+
+            {hydrated && saved && overview.nodes.length > 0 && (
+              <div className="pc-summary">
+                <div className="pc-summary__cell">
+                  <span className="label pc-summary__key">nodes</span>
+                  <span className="code pc-summary__val">{overview.nodes.length}</span>
+                </div>
+                <div className="pc-summary__cell">
+                  <span className="label pc-summary__key">target</span>
+                  <span className="code pc-summary__val pc-summary__val--sm">
+                    {overview.target ? overview.target.subtitle : "none"}
+                  </span>
+                </div>
+                {overview.target && (
+                  <>
+                    <div className="pc-summary__cell">
+                      <span className="label pc-summary__key">kept per guest</span>
+                      <span className="code pc-summary__val">{maxBackupsKept(saved.backups)}</span>
+                    </div>
+                    <div className="pc-summary__cell">
+                      <span className="label pc-summary__key">reaches back</span>
+                      <span className="code pc-summary__val pc-summary__val--sm">{retentionReach(saved.backups)}</span>
+                    </div>
+                    <div className="pc-summary__cell">
+                      <span className="label pc-summary__key">off-site</span>
+                      <span className="code pc-summary__val pc-summary__val--sm">{overview.offsite ? "yes" : "no"}</span>
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
+
+            <ReactFlowProvider>
+              <BackupCanvas overview={overview} hydrated={hydrated} hasSaved={!!saved} />
+            </ReactFlowProvider>
+
+            {hydrated && saved && !overview.target && (
+              <div className="pc-callout pc-callout--danger">
+                <span className="code pc-callout__glyph">✗</span>
+                <div className="pc-callout__body">
+                  <p className="body pc-callout__title">no backups — nothing to cable</p>
+                  <p className="body pc-callout__text text-ink-muted">
+                    You chose &quot;{backupTargetLabel("none")}&quot;. Ceph and zfs
+                    replication survive a failed node, not a deleted vm or a
+                    bad upgrade. Go back to step 5 to pick a target.
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {hydrated && saved && overview.target && shared > 0 && (
+              <div className="pc-callout pc-callout--info">
+                <span className="code pc-callout__glyph">#</span>
+                <div className="pc-callout__body">
+                  <p className="body pc-callout__text text-ink-muted">
+                    {shared === overview.nodes.length ? "Every node" : `${shared} of ${overview.nodes.length} nodes`}{" "}
+                    send backups over the management link — the dashed cables. A
+                    bridge with the &quot;backups&quot; purpose in step 3 moves them
+                    off it.
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {hydrated && saved && <ProblemList problems={blocking} step="backups" />}
+            <div className="pc-stepflow__nav">
+              <Link href="/setup" className="pc-btn pc-btn--ghost">
+                ← back to backups
+              </Link>
+              <button
+                type="button"
+                className="pc-btn pc-btn--primary"
+                onClick={goToAccess}
+                disabled={blocking.length > 0}
+                title={blocking.length > 0 ? "fix the problems listed above first" : undefined}
+              >
+                <span className="pc-btn__bracket">[</span>
+                next
+                <span className="pc-btn__bracket">]</span>
+              </button>
+            </div>
           </div>
-
-          {hydrated && saved && overview.nodes.length > 0 && (
-            <div className="pc-summary">
-              <div className="pc-summary__cell">
-                <span className="label pc-summary__key">nodes</span>
-                <span className="code pc-summary__val">{overview.nodes.length}</span>
-              </div>
-              <div className="pc-summary__cell">
-                <span className="label pc-summary__key">target</span>
-                <span className="code pc-summary__val pc-summary__val--sm">
-                  {overview.target ? overview.target.subtitle : "none"}
-                </span>
-              </div>
-              {overview.target && (
-                <>
-                  <div className="pc-summary__cell">
-                    <span className="label pc-summary__key">kept per guest</span>
-                    <span className="code pc-summary__val">{maxBackupsKept(saved.backups)}</span>
-                  </div>
-                  <div className="pc-summary__cell">
-                    <span className="label pc-summary__key">reaches back</span>
-                    <span className="code pc-summary__val pc-summary__val--sm">{retentionReach(saved.backups)}</span>
-                  </div>
-                  <div className="pc-summary__cell">
-                    <span className="label pc-summary__key">off-site</span>
-                    <span className="code pc-summary__val pc-summary__val--sm">{overview.offsite ? "yes" : "no"}</span>
-                  </div>
-                </>
-              )}
-            </div>
-          )}
-
-          <ReactFlowProvider>
-            <BackupCanvas overview={overview} hydrated={hydrated} hasSaved={!!saved} />
-          </ReactFlowProvider>
-
-          {hydrated && saved && !overview.target && (
-            <div className="pc-callout pc-callout--danger">
-              <span className="code pc-callout__glyph">✗</span>
-              <div className="pc-callout__body">
-                <p className="body pc-callout__title">no backups — nothing to cable</p>
-                <p className="body pc-callout__text text-ink-muted">
-                  You chose &quot;{backupTargetLabel("none")}&quot;. Ceph and zfs
-                  replication survive a failed node, not a deleted vm or a
-                  bad upgrade. Go back to step 4 to pick a target.
-                </p>
-              </div>
-            </div>
-          )}
-
-          {hydrated && saved && overview.target && shared > 0 && (
-            <div className="pc-callout pc-callout--info">
-              <span className="code pc-callout__glyph">#</span>
-              <div className="pc-callout__body">
-                <p className="body pc-callout__text text-ink-muted">
-                  {shared === overview.nodes.length ? "Every node" : `${shared} of ${overview.nodes.length} nodes`}{" "}
-                  send backups over the management link — the dashed cables. A
-                  bridge with the &quot;backups&quot; purpose in step 2 moves them
-                  off it.
-                </p>
-              </div>
-            </div>
-          )}
-
-          {hydrated && saved && overview.nodes.length > 0 && (
-            <AnswerFiles
-              state={saved}
-              ctx={{ hostnameSuffix: saved.hostnameSuffix, gateway: saved.gateway, dns: saved.dns, ...browser }}
-              blocked={blocking.length > 0}
-            />
-          )}
-
-          {hydrated && saved && <ProblemList problems={blocking} step="backups" />}
-          <div className="pc-stepflow__nav">
-            <Link href="/setup" className="pc-btn pc-btn--ghost">
-              ← back to backups
-            </Link>
-            <button type="button" className="pc-btn" disabled title="step 5 isn't built yet">
-              <span className="pc-btn__bracket">[</span>
-              next
-              <span className="pc-btn__bracket">]</span>
-            </button>
-          </div>
-        </div>
+        )}
       </main>
     </div>
   );

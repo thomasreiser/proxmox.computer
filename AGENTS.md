@@ -1,6 +1,6 @@
 # proxmox.computer — agent guide
 
-A static, client-only Next.js app (`output: "export"`, `trailingSlash: true`). There is no server, no API routes, no account: all state lives in the visitor's `localStorage`. Never add anything that needs a runtime server or sends user data anywhere.
+A static, client-only Next.js app (`output: "export"`, `trailingSlash: true`). There is no server, no API routes, no account: all state lives in the visitor's `localStorage`, encrypted with a passphrase they choose. Never add anything that needs a runtime server or sends user data anywhere.
 
 ## Priorities, in order
 
@@ -39,21 +39,51 @@ All three of `npm test`, `npx tsc --noEmit` and `npm run lint` must be clean bef
 ```
 src/app/setup/
   page.tsx          the wizard — React components and state only
-  wizard-state.ts   data model, PersistedState, load/persist, STORAGE_VERSION
+  wizard-state.ts   data model, PersistedState, STEP_VERSIONS / STEP_SECTIONS (which
+                    fields each step saves, and its shape check), STORAGE_VERSION
+  saved-state.ts    load/save/persistCurrentStep; restoreSaved() keeps a save up to its
+                    first stale step and starts that step and the rest over; freshState()
   validation.ts     field validators: pure, return null | message
   derive.ts         defaults, address derivation, conflicts, cross-node sync
   hints.ts          advisories (Hint = { tone, glyph, text }); never block progress
-  storage.ts        step 3 logic: disk roles, capacity maths, storage hints
-  backups.ts        step 4 logic: targets, retention, validators, backup hints
+  location.ts       step 1 logic: country, keyboard, timezone — options, browser detection
+  storage.ts        step 4 logic: disk roles, capacity maths, storage hints
+  backups.ts        step 5 logic: targets, retention, validators, backup hints
+  access.ts         step 6 logic: ssh key parsing/validation, root passwords, oidc, hints
+  software.ts       step 7 logic: guests (vms/containers) in proxmox's create-dialog detail
+                    — disks and nics as lists, the storage/bridges/cpu types/ha each node
+                    offers them, normalizeGuest() re-checking every edit, capacity hints;
+                    images (and which take cloud-init) in src/data/guest-images.json
+  kubernetes.ts     step 7's kubernetes planner: control planes / workers / placement
+                    (shared or separate nodes) → talos vms marked with a k8sRole — never
+                    ha, disks node-local, cpu type host; persistent volumes on ceph
+                    (ceph-csi) through effectiveCephVolumes(); drawn by kubernetes-panel.tsx
+  guest-card.tsx    step 7's per-guest editor: essentials open, proxmox's "advanced"
+                    options in collapsed sections
+  form-fields.tsx   fields the steps share (CidrField, CheckedTextField, Select, Check) and
+                    RevealErrorsContext — kept out of page.tsx so other modules can use them
+  answer-files-panel.tsx  step 8's downloads (async: hashes + sealed setup)
+  capacity.ts       memory / disk meters per node and pool: proxmox, ceph, zfs overhead
+                    (documented defaults, labeled as estimates) + guests; drawn by
+                    meter-bar.tsx in --meter-* colors (palette-validated) — full in the
+                    step 7 preview, `compact` (room left, in guest terms) in the form
   step-checks.ts    per-step blocking problems; problemsUpTo(step) gates every hand-off
-  cpu.ts            cpu family catalog and qemu type resolution
+  vault.ts          the encrypted store: PBKDF2 → AES-GCM envelopes, the in-memory session key
+  vault-gate.tsx    the passphrase prompt (create / unlock / start over) in front of every page
+  password-hash.ts  sha-512-crypt ($6$) on WebCrypto, for root-password-hashed
+  cpu.ts            cpu family catalog and qemu type resolution; cpuTypeOptions() — the
+                    guest cpu types every given host can run (cpu_types in the data), and
+                    clusterCpuBaseline(), the default a guest follows
   answer-file.ts    each node's answer.toml for the unattended installer; never names
-                    a device (boot disk stays CHANGE-ME) and never writes a password
-                    — embeds the whole PersistedState as a base64 comment line, which
-                    readAnswerToml() reads back; src/app/open-setup.tsx reopens it
+                    a device (boot disk stays CHANGE-ME); root password only as a $6$
+                    hash; embeds the sealed setup as one comment line, which
+                    readAnswerToml() + openAnswerSetup() read back; src/app/open-setup.tsx
+                    reopens it after asking for the file's passphrase
   test-fixtures.ts  node(), cluster(), nics(), disks(), bridge(), bond(), network(),
-                    backupPlan(), persistedState() — a complete valid save
-  wizard-test-helpers.tsx  renderAtNetworkStep / renderAtStorageStep /
+                    backupPlan(), accessPlan(), persistedState() — a complete valid save;
+                    ED25519_KEY / RSA_KEY are real public keys
+  wizard-test-helpers.tsx  renderAtHardwareStep (a fresh wizard opens on location) /
+                    renderAtNetworkStep / renderAtStorageStep /
                     renderAtBackupsStep (slow; prefer restoring a save), waitForSave,
                     addSpareDisk / addTwoSpareDisks, clusterStorage — shared by the
                     wizard integration tests
@@ -71,9 +101,10 @@ src/test/router.ts      the router spy every component sees — assert router.pu
 
 ## Wizard invariants
 
-- **Persistence.** `PersistedState` is saved with a debounced (300 ms) autosave and validated by `isPersistedState` on load. **Any change to the shape of `PersistedState` or anything nested in it must bump `STORAGE_VERSION`** and extend `isPersistedState`. A mismatched version is discarded wholesale, never migrated or half-applied.
+- **Encryption at rest.** The state holds root passwords and an OIDC secret, so it is never stored in the clear: `savePersistedState` / `loadPersistedState` / `persistCurrentStep` go through `vault.ts` and are async. The key is derived from the visitor's passphrase and lives in memory only (it survives client-side navigation, not a reload). Every page that reads the state sits behind `<VaultGate>`. Answer files carry the same sealed envelope, never a plain state, and root passwords only as `$6$` hashes. Never log, render or embed a secret anywhere but its own field.
+- **Persistence.** `PersistedState` is saved with a debounced (300 ms) autosave and restored by `restoreSaved` on load. **Every step has its own version in `STEP_VERSIONS`: any change to the shape of what a step saves must bump that step's version** and extend its check in `STEP_SECTIONS` (the comment above it says which fields belong to which step — disk roles are step 4's, each node's network step 3's). On load, a save is kept up to its first step with another version (or a failed check); that step and every later one start over from `freshState()`, the visitor is sent back to it and told so. Nothing is migrated or half-applied within a step. `STORAGE_VERSION` covers only the save's layout (which fields belong to which step): bump it when that changes, and a save is discarded wholesale.
 - **Hydration.** `localStorage` is only read after mount (`hydrated` flag). Never read it during render, and never let the autosave run before hydration.
-- **Step hand-off.** No step advances directly. Each step's "preview" button routes to `/setup/preview/<step>`; that page's "next" calls `persistCurrentStep(next)` then `router.push("/setup")`, and the wizard restores on the new step. New steps follow the same pattern: add the id to `WizardStepId`, `wizard-steps.json` and `isPersistedState`.
+- **Step hand-off.** No step advances directly. Each step's "preview" button routes to `/setup/preview/<step>`; that page's "next" awaits `persistCurrentStep(next)`, then calls `router.push("/setup")`, and the wizard restores on the new step. New steps follow the same pattern: add the id to `WizardStepId`, `wizard-steps.json`, `isPersistedState` and `STEP_ORDER`. Three exceptions, all through the same `problemsUpTo` gate (`tryNext`): step 1, location, has nothing to draw, so its "next" goes straight to hardware; step 7, software, is optional, so with no guests it shows "skip" to step 8 instead of "preview"; step 8, install, is the end — no preview, just the answer-file downloads, offered once steps 1–7 have no problems. Copy refers to steps by number ("add a disk in step 2"), so inserting a step means renumbering those too.
 - **Identical-across-nodes modes** (`identicalHardware`, `identicalNetwork`, `identicalStorage`) copy *structure* only. Per-node identity (hostname, host IPs, disk sizes/names) is never overwritten.
 - **Effective vs chosen.** Several choices are stored as the visitor made them and *read* through an effective-value function that clamps them to what the current nodes and disks allow, without discarding the choice. Always read the effective one:
   - `clusterStorage` → `effectiveClusterStorage()`. Ceph and zfs are independent switches, and both at once need 2 spare disks per node. When only one fits, ceph wins.
@@ -95,7 +126,8 @@ Vitest + Testing Library + jsdom. Tests sit next to their source as `*.test.ts(x
 
 **Integration tests** drive the real UI: `setup/page.test.tsx` (step flow, persistence, advisories), `setup/wizard-editing.test.tsx` (every editable control), `setup/preview/previews.test.tsx` (each preview route from a saved state, and its hand-off), and page tests for `how-it-works` and the landing page. Put a new test in the file whose job it matches, and use the shared helpers rather than re-deriving them. There's no mocked component state and no reaching into internals. Patterns that are known to matter:
 
-- Reach step N the way the app does, with `renderAtNetworkStep()` / `renderAtStorageStep()`: fill the earlier steps in, call `persistCurrentStep`, remount. There's no in-page "continue" button to click.
+- Reach step N the way the app does, with `renderAtNetworkStep()` / `renderAtStorageStep()`: fill the earlier steps in, call `persistCurrentStep`, remount. There's no in-page "continue" button to click. To start at a later step, `await savePersistedState(persistedState({ currentStep: ... }))` and render.
+- **Every test starts unlocked** (`src/test/setup.ts` starts a vault session with a cheap KDF). Tests of the passphrase prompt call `lock()` first. Never write `localStorage` directly to plant a state: it has to be sealed, so use `savePersistedState` (from `saved-state.ts`), and read with `await saved()` / `loadPersistedState()`. To plant an older build's save, give it a `stepVersions` with one step lowered.
 - Wait for the debounced save with `waitForSave(predicate)`. Before a hand-off, wait for localStorage to *change*: a "some state exists" check passes instantly and hands off a stale state.
 - Prefer `getByRole(..., { name })` with an anchored regex (`/^ceph osd/`). Labels contain hint text, so unanchored names collide (for example, "zfs with replication" appears inside the ceph warning).
 - Per-node UI renders once per node. Use `getAll*` and assert the count, or scope with `within(...)`.

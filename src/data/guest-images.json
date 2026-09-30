@@ -1,0 +1,13 @@
+[
+  { "id": "debian-13", "kind": "container", "label": "debian 13 (trixie)", "cloudInit": false },
+  { "id": "debian-12", "kind": "container", "label": "debian 12 (bookworm)", "cloudInit": false },
+  { "id": "ubuntu-24.04", "kind": "container", "label": "ubuntu 24.04 lts", "cloudInit": false },
+  { "id": "alpine-3.22", "kind": "container", "label": "alpine 3.22", "cloudInit": false },
+  { "id": "rocky-9", "kind": "container", "label": "rocky linux 9", "cloudInit": false },
+  { "id": "debian-13-cloud", "kind": "vm", "label": "debian 13 — cloud image", "cloudInit": true },
+  { "id": "debian-12-cloud", "kind": "vm", "label": "debian 12 — cloud image", "cloudInit": true },
+  { "id": "ubuntu-24.04-cloud", "kind": "vm", "label": "ubuntu 24.04 lts — cloud image", "cloudInit": true },
+  { "id": "rocky-9-cloud", "kind": "vm", "label": "rocky linux 9 — cloud image", "cloudInit": true },
+  { "id": "talos", "kind": "vm", "label": "talos linux — a kubernetes os", "cloudInit": true },
+  { "id": "iso", "kind": "vm", "label": "none — boot an iso and install it yourself", "cloudInit": false }
+]

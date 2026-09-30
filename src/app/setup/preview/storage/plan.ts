@@ -102,7 +102,7 @@ export interface StorageOverview {
  * it. It's the number that decides whether the storage performs, so it
  * belongs next to the disks rather than only in the network preview.
  *
- * Only ceph is held to 10 gbe — the same line the wizard draws in step 2.
+ * Only ceph is held to 10 gbe — the same line the wizard draws in step 3.
  * Ceph waits on this link for every write, so a slow one slows every vm;
  * zfs replication is a scheduled copy in the background, where a slower
  * link only makes each run take longer. Both are flagged when no nic
@@ -123,7 +123,7 @@ export function storageLinkFor(node: NodeInfo, mode: StorageMode): StorageLinkVi
       key,
       label: "not set up",
       warn: true,
-      reason: `no nic on this node carries ${mode === "ceph" ? "ceph" : "zfs replication"} traffic — set one up in step 2`,
+      reason: `no nic on this node carries ${mode === "ceph" ? "ceph" : "zfs replication"} traffic — set one up in step 3`,
     };
   }
 

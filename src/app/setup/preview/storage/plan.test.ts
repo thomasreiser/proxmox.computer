@@ -63,7 +63,7 @@ describe("storageLinkFor", () => {
   it("warns when no nic carries the mode at all, and says where to fix it", () => {
     const link = storageLinkFor(node(), "ceph");
     expect(link).toMatchObject({ key: "ceph link", label: "not set up", warn: true });
-    expect(link.reason).toMatch(/no nic on this node carries ceph traffic — set one up in step 2/);
+    expect(link.reason).toMatch(/no nic on this node carries ceph traffic — set one up in step 3/);
   });
 
   it("ignores a disabled bridge", () => {

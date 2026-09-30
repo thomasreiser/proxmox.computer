@@ -2,24 +2,23 @@ import { describe, expect, it } from "vitest";
 import {
   DISK_PLACEHOLDER,
   STATE_MARKER,
+  openAnswerSetup,
+  prepareAnswerFiles,
   readAnswerToml,
-  stateBlock,
   answerFileName,
   buildAnswerToml,
-  countryFor,
-  keyboardFor,
   nodeFqdn,
   tomlDataUrl,
   tomlString,
 } from "./answer-file";
-import { bond, network, nics, node, persistedState } from "./test-fixtures";
+import { ED25519_KEY, RSA_KEY, accessPlan, bond, network, nics, node, persistedState } from "./test-fixtures";
+import { sha512Crypt } from "./password-hash";
 
 const ctx = {
   hostnameSuffix: "lab.lan",
   gateway: "10.0.10.1",
   dns: "10.0.10.53",
-  timezone: "Europe/Vienna",
-  locale: "de-AT",
+  location: { country: "at", keyboard: "de", timezone: "Europe/Vienna" },
 };
 const pve01 = () => node({ network: network({ hostLabel: "pve01", cidr: "10.0.10.11/24" }), bootDiskSizeGb: "512" });
 /** every uncommented `key = value` line, as a map */
@@ -30,41 +29,6 @@ const keys = (toml: string) =>
       .filter((l) => /^[a-z.A-Z_-]+ = /.test(l))
       .map((l) => [l.slice(0, l.indexOf(" = ")), l.slice(l.indexOf(" = ") + 3)]),
   );
-
-describe("keyboardFor", () => {
-  it.each([
-    ["de-AT", "de"],
-    ["de-CH", "de-ch"],
-    ["en-GB", "en-gb"],
-    ["en-US", "en-us"],
-    ["fr-CA", "fr-ca"],
-    ["pt_BR", "pt-br"],
-    ["sv-SE", "se"],
-    ["da", "dk"],
-    ["ja-JP", "jp"],
-    ["nb-NO", "no"],
-  ])("maps %s to %s", (locale, layout) => {
-    expect(keyboardFor(locale)).toBe(layout);
-  });
-
-  // only layouts the installer accepts, or it rejects the file
-  it("falls back to en-us for anything the installer doesn't know", () => {
-    expect(keyboardFor("zh-CN")).toBe("en-us");
-    expect(keyboardFor("")).toBe("en-us");
-  });
-});
-
-describe("countryFor", () => {
-  it("takes the locale's region", () => {
-    expect(countryFor("de-AT")).toBe("at");
-    expect(countryFor("en_GB")).toBe("gb");
-  });
-
-  it("falls back to us without a usable region", () => {
-    expect(countryFor("de")).toBe("us");
-    expect(countryFor("es-419")).toBe("us");
-  });
-});
 
 describe("tomlString", () => {
   it("quotes and escapes", () => {
@@ -85,9 +49,18 @@ describe("naming", () => {
   });
 });
 
+// what a file carries beyond the plan, for tests that don't care
+const bare = { passwordHash: null, sshKeys: [] };
+
 describe("buildAnswerToml", () => {
+  // step 1's answers, not the browser the file happens to be made in
+  it("takes keyboard, country and timezone from step 2", () => {
+    const k = keys(buildAnswerToml(pve01(), { ...ctx, location: { country: "ch", keyboard: "fr-ch", timezone: "Europe/Zurich" } }, bare));
+    expect(k).toMatchObject({ keyboard: '"fr-ch"', country: '"ch"', timezone: '"Europe/Zurich"' });
+  });
+
   it("fills in everything the wizard knows", () => {
-    const k = keys(buildAnswerToml(pve01(), ctx));
+    const k = keys(buildAnswerToml(pve01(), ctx, bare));
     expect(k).toMatchObject({
       keyboard: '"de"',
       country: '"at"',
@@ -104,28 +77,45 @@ describe("buildAnswerToml", () => {
   });
 
   it("uses the installer's kebab-case keys and sections", () => {
-    const toml = buildAnswerToml(pve01(), ctx);
+    const toml = buildAnswerToml(pve01(), ctx, { passwordHash: "$6$s$h", sshKeys: [ED25519_KEY] });
     for (const section of ["[global]", "[network]", "[disk-setup]"]) expect(toml).toContain(section);
     expect(toml).toContain("disk-list = ");
+    expect(toml).toContain("root-password-hashed = ");
+    expect(toml).toContain("root-ssh-keys = ");
     expect(toml).not.toMatch(/^[a-z]+_[a-z]+ = /m);
   });
 
   // a guessed disk would get wiped: the placeholder matches nothing
   it("never names the boot disk, but describes it", () => {
-    const toml = buildAnswerToml(pve01(), ctx);
+    const toml = buildAnswerToml(pve01(), ctx, bare);
     expect(keys(toml)["disk-list"]).toBe(`["${DISK_PLACEHOLDER}"]`);
     expect(toml).toContain("the boot disk you declared: nvme, 512 gb");
   });
 
-  // a guessed password would install fine and lock you out
-  it("leaves the root password out, so the file won't validate without one", () => {
-    const k = keys(buildAnswerToml(pve01(), ctx));
+  it("writes the root password's hash, never a password", () => {
+    const k = keys(buildAnswerToml(pve01(), ctx, { passwordHash: "$6$salt$hash", sshKeys: [] }));
+    expect(k["root-password-hashed"]).toBe('"$6$salt$hash"');
     expect(k).not.toHaveProperty("root-password");
+  });
+
+  // no password, no key — prepare-iso refuses the file rather than installing a node nobody can log in to
+  it("leaves the password key out when there's no hash", () => {
+    const k = keys(buildAnswerToml(pve01(), ctx, bare));
     expect(k).not.toHaveProperty("root-password-hashed");
+    expect(k).not.toHaveProperty("root-password");
+  });
+
+  it("lists every ssh key for root", () => {
+    const k = keys(buildAnswerToml(pve01(), ctx, { passwordHash: null, sshKeys: [ED25519_KEY, RSA_KEY] }));
+    expect(k["root-ssh-keys"]).toBe(`[${tomlString(ED25519_KEY)}, ${tomlString(RSA_KEY)}]`);
+  });
+
+  it("leaves root-ssh-keys out without keys", () => {
+    expect(keys(buildAnswerToml(pve01(), ctx, bare))).not.toHaveProperty("root-ssh-keys");
   });
 
   it("never pins a nic — the wizard doesn't know its mac", () => {
-    expect(keys(buildAnswerToml(pve01(), ctx))).not.toHaveProperty("filter.ID_NET_NAME_MAC");
+    expect(keys(buildAnswerToml(pve01(), ctx, bare))).not.toHaveProperty("filter.ID_NET_NAME_MAC");
   });
 
   it("explains that a management bond is built later", () => {
@@ -133,12 +123,12 @@ describe("buildAnswerToml", () => {
       nics: nics("10gbe", "10gbe"),
       network: network({ bonds: [bond({ nicIndices: [0, 1] })], bondCount: "1", managementInterfaceId: "bond-0" }),
     });
-    expect(buildAnswerToml(n, ctx)).toMatch(/management is a bond/);
-    expect(buildAnswerToml(pve01(), ctx)).not.toMatch(/management is a bond/);
+    expect(buildAnswerToml(n, ctx, bare)).toMatch(/management is a bond/);
+    expect(buildAnswerToml(pve01(), ctx, bare)).not.toMatch(/management is a bond/);
   });
 
   it("falls back sensibly without a domain or timezone", () => {
-    const k = keys(buildAnswerToml(pve01(), { ...ctx, hostnameSuffix: "", timezone: "" }));
+    const k = keys(buildAnswerToml(pve01(), { ...ctx, hostnameSuffix: "", location: { ...ctx.location, timezone: "" } }, bare));
     expect(k.fqdn).toBe('"pve01"');
     expect(k.mailto).toBe('"root@localhost"');
     expect(k.timezone).toBe('"UTC"');
@@ -147,63 +137,131 @@ describe("buildAnswerToml", () => {
 
 describe("tomlDataUrl", () => {
   it("round-trips the text as a toml download", () => {
-    const toml = buildAnswerToml(pve01(), ctx);
+    const toml = buildAnswerToml(pve01(), ctx, bare);
     const url = tomlDataUrl(toml);
     expect(url.startsWith("data:application/toml;charset=utf-8,")).toBe(true);
     expect(decodeURIComponent(url.slice(url.indexOf(",") + 1))).toBe(toml);
   });
 });
 
+describe("prepareAnswerFiles", () => {
+  it("writes one file per node, each with its own password's hash", async () => {
+    const state = persistedState();
+    const files = await prepareAnswerFiles(state, ctx);
+    expect(files.map((f) => f.fileName)).toEqual(["answer-pve01.toml", "answer-pve02.toml", "answer-pve03.toml"]);
+    const hashes = files.map((f) => keys(f.toml)["root-password-hashed"]);
+    expect(hashes.every((h) => /^"\$6\$[./0-9A-Za-z]{16}\$[./0-9A-Za-z]{86}"$/.test(h))).toBe(true);
+    expect(new Set(hashes).size).toBe(3);
+  });
+
+  // the whole point of hashing and sealing
+  it("never carries a password in the clear", async () => {
+    const state = persistedState();
+    for (const file of await prepareAnswerFiles(state, ctx)) {
+      for (const password of state.access.rootPasswords) expect(file.toml).not.toContain(password);
+      expect(file.toml).not.toContain("root-password =");
+    }
+  });
+
+  it("hashes the password the installer will check", async () => {
+    const state = persistedState();
+    const [first] = await prepareAnswerFiles(state, ctx);
+    const hash = JSON.parse(keys(first.toml)["root-password-hashed"]) as string;
+    const salt = hash.split("$")[2];
+    expect(await sha512Crypt(state.access.rootPasswords[0], salt)).toBe(hash);
+  });
+
+  it("gives every node the ssh keys", async () => {
+    const files = await prepareAnswerFiles(persistedState(), ctx);
+    for (const file of files) expect(keys(file.toml)["root-ssh-keys"]).toBe(`[${tomlString(ED25519_KEY)}]`);
+  });
+});
+
 describe("the embedded setup", () => {
-  it("round-trips the whole setup through an answer file", () => {
-    const state = persistedState({ currentStep: "backups" });
-    const toml = buildAnswerToml(state.nodes[0], ctx, state);
+  const withSetup = async (state = persistedState({ currentStep: "backups" })) => {
+    const [first] = await prepareAnswerFiles(state, ctx);
+    return { state, toml: first.toml };
+  };
+  const reopen = async (toml: string, passphrase = "test passphrase") => {
+    const read = readAnswerToml(toml);
+    if ("error" in read) return read;
+    const opened = await openAnswerSetup(read.envelope, passphrase);
+    return "error" in opened ? opened : { state: opened.state };
+  };
+
+  it("round-trips the whole setup through an answer file", async () => {
+    const { state, toml } = await withSetup();
     expect(toml).toContain(STATE_MARKER);
-    expect(readAnswerToml(toml)).toEqual({ state });
+    expect(await reopen(toml)).toEqual({ state });
   });
 
-  it("carries non-ascii text intact", () => {
-    const state = persistedState({ hostnameSuffix: "zürich.lan" });
-    expect(readAnswerToml(stateBlock(state))).toEqual({ state });
+  // it holds root passwords and the oidc secret — sealed, never readable
+  it("seals the setup, so nothing in it reads in the clear", async () => {
+    const { state, toml } = await withSetup(
+      persistedState({ access: accessPlan({ oidc: { ...accessPlan().oidc, enabled: true, clientSecret: "oidc-secret-xyz" } }) }),
+    );
+    const line = toml.split("\n").find((l) => l.startsWith(STATE_MARKER)) ?? "";
+    const decoded = atob(line.slice(STATE_MARKER.length).trim());
+    expect(decoded).not.toContain("oidc-secret-xyz");
+    expect(decoded).not.toContain(state.access.rootPasswords[0]);
+    expect(decoded).not.toContain("pve01");
   });
 
-  // base64: nothing typed into the wizard can break out of the comment
-  it("keeps the state on one comment line", () => {
-    const state = persistedState({ hostnameSuffix: 'a"b\nc' });
-    const line = stateBlock(state).split("\n").find((l) => l.startsWith(STATE_MARKER)) ?? "";
+  it("wants the passphrase it was sealed with", async () => {
+    const { toml } = await withSetup();
+    expect(await reopen(toml, "not the passphrase")).toEqual({ error: expect.stringMatching(/not the passphrase/) });
+  });
+
+  // base64: nothing in the envelope can break out of the comment
+  it("keeps the setup on one comment line", async () => {
+    const { toml } = await withSetup(persistedState({ hostnameSuffix: 'a"b\nc' }));
+    const line = toml.split("\n").find((l) => l.startsWith(STATE_MARKER)) ?? "";
     expect(line).toMatch(/^# proxmox\.computer-state: [A-Za-z0-9+/=]+$/);
   });
 
   it("leaves the setup out of a bare answer file", () => {
-    expect(buildAnswerToml(pve01(), ctx)).not.toContain(STATE_MARKER);
+    expect(buildAnswerToml(pve01(), ctx, bare)).not.toContain(STATE_MARKER);
   });
 
-  // the visitor fills in the password and disk before installing — those
-  // edits (and windows line endings) mustn't stop the file reopening
-  it("still reads a file the visitor has edited", () => {
-    const state = persistedState();
-    const edited = buildAnswerToml(state.nodes[0], ctx, state)
-      .replace('# root-password-hashed = "$y$j9T$..."', 'root-password-hashed = "$y$j9T$abc"')
-      .replace(`["${DISK_PLACEHOLDER}"]`, '["nvme0n1"]')
-      .replace(/\n/g, "\r\n");
-    expect(readAnswerToml(edited)).toEqual({ state });
+  // the visitor fills in the disk before installing — that edit (and
+  // windows line endings) mustn't stop the file reopening
+  it("still reads a file the visitor has edited", async () => {
+    const { state, toml } = await withSetup();
+    const edited = toml.replace(`["${DISK_PLACEHOLDER}"]`, '["nvme0n1"]').replace(/\n/g, "\r\n");
+    expect(await reopen(edited)).toEqual({ state });
   });
 
   it("says when a file has no setup in it", () => {
-    const result = readAnswerToml(buildAnswerToml(pve01(), ctx));
-    expect(result).toEqual({ error: expect.stringMatching(/no proxmox\.computer setup in it/) });
+    expect(readAnswerToml(buildAnswerToml(pve01(), ctx, bare))).toEqual({
+      error: expect.stringMatching(/no proxmox\.computer setup in it/),
+    });
   });
 
-  it("says when the setup line is damaged", () => {
+  it("says when the setup line is damaged or unencrypted", () => {
     expect(readAnswerToml(`${STATE_MARKER} not-base64!!`)).toEqual({ error: expect.stringMatching(/damaged/) });
     expect(readAnswerToml(`${STATE_MARKER} ${btoa("{}")}`)).toEqual({ error: expect.stringMatching(/damaged/) });
+    // a plain setup, as files carried before encryption
+    expect(readAnswerToml(`${STATE_MARKER} ${btoa(JSON.stringify(persistedState()))}`)).toEqual({
+      error: expect.stringMatching(/older version/),
+    });
   });
 
-  // a mismatched version is discarded, never migrated (see isPersistedState)
-  it("says when the file came from another version", () => {
-    const old = { ...persistedState(), version: 7 };
-    expect(readAnswerToml(`${STATE_MARKER} ${btoa(JSON.stringify(old))}`)).toEqual({
-      error: expect.stringMatching(/different version/),
-    });
+  // a step this build changed starts over; the ones before it are kept
+  it("reopens an older setup up to the step this build changed", async () => {
+    const state = persistedState({ currentStep: "software", hostnameSuffix: "lab.lan" });
+    const { toml } = await withSetup({ ...state, stepVersions: { ...state.stepVersions, access: 0 } });
+    const read = readAnswerToml(toml);
+    if ("error" in read) throw new Error(read.error);
+    const opened = await openAnswerSetup(read.envelope, "test passphrase");
+    if ("error" in opened) throw new Error(opened.error);
+    expect(opened.startedOverFrom).toBe("access");
+    expect(opened.state).toMatchObject({ currentStep: "access", hostnameSuffix: "lab.lan", backups: state.backups });
+    expect(opened.state.access.sshKeys).toBe("");
+  });
+
+  // another layout altogether is discarded, never migrated (see restoreSaved)
+  it("says when the sealed setup came from another version", async () => {
+    const { toml } = await withSetup({ ...persistedState(), version: 7 });
+    expect(await reopen(toml)).toEqual({ error: expect.stringMatching(/different version/) });
   });
 });

@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { backupProblems, hardwareProblems, networkProblems, problemsUpTo, storageProblems } from "./step-checks";
+import { accessProblems, backupProblems, hardwareProblems, locationProblems, softwareProblems, networkProblems, problemsUpTo, storageProblems } from "./step-checks";
 import { required } from "./validation";
-import { backupPlan, bond, bridge, cluster, disks, network, nics, persistedState } from "./test-fixtures";
+import { newGuest } from "./software";
+import { accessPlan, backupPlan, bond, bridge, cluster, disks, network, nics, persistedState, guestWith, softwarePlan } from "./test-fixtures";
 
 // a node whose every required field is filled
 const complete = () => persistedState({ nodes: cluster(3, { ramGb: "64", bootDiskSizeGb: "512" }) });
@@ -239,8 +240,154 @@ describe("backupProblems", () => {
     expect(fields({ target: "none", pbsAddress: "", schedule: "" })).toEqual([]);
   });
 
-  it("labels its problems as step 4's", () => {
+  it("labels its problems as step 5's", () => {
     expect(backupProblems({ ...complete(), backups: backupPlan({ pbsAddress: "" }) })[0].step).toBe("backups");
+  });
+});
+
+describe("accessProblems", () => {
+  const fields = (access: Parameters<typeof accessPlan>[0]) =>
+    accessProblems({ ...complete(), access: accessPlan(access) }).map((p) => `${p.where}: ${p.field}`);
+
+  it("finds nothing wrong with a key and a password per node", () => {
+    expect(fields({})).toEqual([]);
+  });
+
+  it("requires a valid ssh key", () => {
+    expect(fields({ sshKeys: "" })).toEqual(["cluster: ssh public key"]);
+    expect(fields({ sshKeys: "ssh-ed25519 nope" })).toEqual(["cluster: ssh public key"]);
+  });
+
+  it("requires every node's root password, by node", () => {
+    expect(fields({ rootPasswords: ["long-enough-pw-1", "short", ""] })).toEqual([
+      "node 02 — pve02: root password",
+      "node 03 — pve03: root password",
+    ]);
+  });
+
+  it("checks oidc only once it's turned on", () => {
+    const oidc = { ...accessPlan().oidc, realm: "pam", issuerUrl: "", clientId: "" };
+    expect(fields({ oidc })).toEqual([]);
+    expect(fields({ oidc: { ...oidc, enabled: true } })).toEqual([
+      "cluster: oidc realm",
+      "cluster: issuer url",
+      "cluster: client id",
+    ]);
+  });
+
+  // a public client has no secret
+  it("never requires a client secret", () => {
+    const oidc = { ...accessPlan().oidc, enabled: true, issuerUrl: "https://auth.lab.lan", clientId: "pve", clientSecret: "" };
+    expect(fields({ oidc })).toEqual([]);
+  });
+});
+
+describe("locationProblems", () => {
+  it("finds nothing wrong with a complete location", () => {
+    expect(locationProblems(complete())).toEqual([]);
+  });
+
+  // a save restored in a browser that lacks its timezone, say
+  it("flags anything outside what the installer takes", () => {
+    const state = { ...complete(), location: { country: "xx", keyboard: "dvorak", timezone: "Mars/Olympus_Mons" } };
+    expect(locationProblems(state).map((p) => p.field)).toEqual(["country", "keyboard", "timezone"]);
+    expect(locationProblems(state)[0].step).toBe("location");
+  });
+});
+
+describe("softwareProblems", () => {
+  const base = () => complete();
+  const guestCtx = () => ({ nodes: base().nodes, clusterStorage: base().clusterStorage, storage: base().storage });
+  const fields = (guests: ReturnType<typeof newGuest>[]) =>
+    softwareProblems({ ...base(), software: softwarePlan(guests) }).map((p) => `${p.where}: ${p.field}`);
+
+  // step 7 is optional
+  it("finds nothing wrong with no guests at all", () => {
+    expect(fields([])).toEqual([]);
+  });
+
+  it("wants space for kubernetes volumes on ceph, only while they're there", () => {
+    const k8s = newGuest("vm", [], guestCtx(), { k8sRole: "worker" });
+    const check = (guests: ReturnType<typeof newGuest>[], volumeGb: string, cephVolumes = true) =>
+      softwareProblems({ ...base(), software: softwarePlan(guests, { volumeGb, cephVolumes }) }).map((p) => `${p.where}: ${p.field}`);
+    expect(check([k8s], "")).toEqual(["kubernetes: space for volumes"]);
+    expect(check([k8s], "0")).toEqual(["kubernetes: space for volumes"]);
+    expect(check([k8s], "200")).toEqual([]);
+    expect(check([k8s], "", false)).toEqual([]);
+    expect(check([newGuest("vm", [], guestCtx())], "")).toEqual([]);
+  });
+
+  it("finds nothing wrong with a fresh guest", () => {
+    expect(fields([newGuest("vm", [], guestCtx())])).toEqual([]);
+  });
+
+  it("wants every name and vmid unique", () => {
+    const a = newGuest("vm", [], guestCtx());
+    const b = { ...newGuest("vm", [a], guestCtx()), name: a.name, vmid: a.vmid };
+    expect(fields([a, b])).toEqual(["guest vm-01: name", "guest vm-01: vmid", "guest vm-01: name", "guest vm-01: vmid"]);
+  });
+
+  it("checks a static address, and that it's not taken", () => {
+    const a = guestWith(newGuest("vm", [], guestCtx()), {}, { ipMode: "static", ip: "10.0.0.50/24" });
+    const b = guestWith(newGuest("vm", [a], guestCtx()), {}, { ipMode: "static", ip: "10.0.0.50/24" });
+    expect(fields([a, b])).toEqual(["guest vm-01: nic 1 ip address", "guest vm-02: nic 1 ip address"]);
+    // node 1's own management address
+    expect(fields([guestWith(newGuest("vm", [], guestCtx()), {}, { ipMode: "static", ip: "10.0.0.11/24" })])).toEqual([
+      "guest vm-01: nic 1 ip address",
+    ]);
+    expect(fields([guestWith(newGuest("vm", [], guestCtx()), {}, { ipMode: "static", ip: "" })])).toEqual(["guest vm-01: nic 1 ip address"]);
+  });
+
+  it("wants a bridge the node offers, and valid sizes", () => {
+    const g = guestWith(newGuest("vm", [], guestCtx(), { cores: "0", memoryGb: "0.3", ballooning: false }), { sizeGb: "" }, { bridge: "vmbr9" });
+    expect(fields([g])).toEqual(["guest vm-01: cores", "guest vm-01: memory", "guest vm-01: disk 1 size", "guest vm-01: nic 1 bridge"]);
+  });
+
+  // the balloon's floor can't sit above the memory it balloons
+  it("keeps ballooning's minimum under the memory", () => {
+    const g = newGuest("vm", [], guestCtx(), { memoryGb: "2", minMemoryGb: "4" });
+    expect(fields([g])).toEqual(["guest vm-01: minimum memory"]);
+    expect(fields([{ ...g, ballooning: false }])).toEqual([]);
+  });
+
+  // an iso vm sets its address in its own installer — nothing to check here
+  it("checks a vm's address only where cloud-init sets it", () => {
+    const iso = guestWith(newGuest("vm", [], guestCtx(), { image: "iso" }), {}, { ipMode: "static", ip: "" });
+    expect(fields([iso])).toEqual([]);
+  });
+
+  it("wants a gateway on the interface's own network", () => {
+    const g = guestWith(newGuest("vm", [], guestCtx()), {}, { ipMode: "static", ip: "10.0.0.50/24", gateway: "10.9.9.1" });
+    expect(fields([g])).toEqual(["guest vm-01: nic 1 gateway"]);
+  });
+
+  it("checks a mac, a rate limit and an mtu", () => {
+    const g = guestWith(newGuest("vm", [], guestCtx()), {}, { macAddress: "01:00:00:00:00:01", rateMbps: "0", mtu: "100" });
+    expect(fields([g])).toEqual(["guest vm-01: nic 1 mac address", "guest vm-01: nic 1 rate limit", "guest vm-01: nic 1 mtu"]);
+  });
+
+  it("wants windows 11 on uefi with a tpm", () => {
+    // a new vm already is
+    const g = newGuest("vm", [], guestCtx(), { image: "iso", osType: "win11" });
+    expect(fields([g])).toEqual([]);
+    expect(fields([{ ...g, bios: "seabios" }])).toEqual(["guest vm-01: system"]);
+    expect(fields([{ ...g, tpm: false }])).toEqual(["guest vm-01: system"]);
+  });
+
+  it("holds each bus to the disks it takes", () => {
+    const base = newGuest("vm", [], guestCtx());
+    const ide = { ...base, disks: [1, 2, 3, 4].map(() => ({ ...base.disks[0], bus: "ide" as const })) };
+    expect(fields([ide])).toEqual(["guest vm-01: disks"]);
+  });
+
+  it("wants a container's mount points on their own absolute paths", () => {
+    const ct = newGuest("container", [], guestCtx());
+    const disks = [ct.disks[0], { ...ct.disks[0], id: "m1", mountPath: "data" }, { ...ct.disks[0], id: "m2", mountPath: "/srv" }, { ...ct.disks[0], id: "m3", mountPath: "/srv" }];
+    expect(fields([{ ...ct, disks }])).toEqual([
+      "guest ct-01: mount point 1 path",
+      "guest ct-01: mount point 2 path",
+      "guest ct-01: mount point 3 path",
+    ]);
   });
 });
 
@@ -259,6 +406,9 @@ describe("problemsUpTo", () => {
 
   it("is empty for a complete plan", () => {
     expect(problemsUpTo("storage", complete())).toEqual([]);
+    expect(problemsUpTo("location", complete())).toEqual([]);
+    expect(problemsUpTo("install", complete())).toEqual([]);
     expect(problemsUpTo("backups", complete())).toEqual([]);
+    expect(problemsUpTo("access", complete())).toEqual([]);
   });
 });

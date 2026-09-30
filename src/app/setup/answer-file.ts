@@ -5,42 +5,19 @@
 // The wizard records intent, never device identity, and this file sits on
 // that line: the installer wipes whatever disk it's pointed at, so the boot
 // disk is left as a placeholder the installer can't match (a safe failure)
-// rather than guessed. The root password is left out entirely, so
-// `prepare-iso` refuses the file until one is added — a guessed password
-// would install fine and lock you out.
+// rather than guessed. The root password goes in as a sha-512-crypt hash,
+// never in the clear, and the embedded setup is sealed with the visitor's
+// passphrase (see vault.ts).
 
-import { STORAGE_VERSION, isPersistedState, type NodeInfo, type PersistedState } from "./wizard-state";
+import { rootPasswordFor, sshKeyLines } from "./access";
+import type { LocationPlan } from "./location";
+import { sha512Crypt } from "./password-hash";
+import { WrongPassphraseError, open, parseEnvelope, seal, type Envelope, type Opened } from "./vault";
+import { STORAGE_VERSION, type NodeInfo, type PersistedState, type SavedStepId } from "./wizard-state";
+import { restoreSaved } from "./saved-state";
 
 /** the placeholder the installer can't match — it stops rather than guesses */
 export const DISK_PLACEHOLDER = "CHANGE-ME";
-
-// the layouts proxmox's installer accepts for `keyboard`
-const KEYBOARDS = new Set([
-  "de", "de-ch", "dk", "en-gb", "en-us", "es", "fi", "fr", "fr-be", "fr-ca", "fr-ch", "hu", "is", "it", "jp",
-  "lt", "mk", "nl", "no", "pl", "pt", "pt-br", "se", "si", "tr",
-]);
-
-// languages whose layout proxmox names after something else
-const LANGUAGE_KEYBOARD: Record<string, string> = { da: "dk", sv: "se", ja: "jp", nb: "no", nn: "no", sl: "si" };
-
-/**
- * A best guess at the installer's keyboard layout from a browser locale
- * ("de-CH" → "de-ch", "sv-SE" → "se"), falling back to en-us. It's only a
- * default — the file says so, and it's one line to change.
- */
-export function keyboardFor(locale: string): string {
-  const [language = "", region = ""] = locale.toLowerCase().split(/[-_]/);
-  const regional = `${language}-${region}`;
-  if (region && KEYBOARDS.has(regional)) return regional;
-  const mapped = LANGUAGE_KEYBOARD[language] ?? language;
-  return KEYBOARDS.has(mapped) ? mapped : "en-us";
-}
-
-/** the two-letter country from a locale's region, or "us" */
-export function countryFor(locale: string): string {
-  const region = locale.split(/[-_]/)[1] ?? "";
-  return /^[a-z]{2}$/i.test(region) ? region.toLowerCase() : "us";
-}
 
 /** a toml basic string — quotes, backslashes and control characters escaped */
 export function tomlString(value: string): string {
@@ -58,10 +35,13 @@ export interface AnswerContext {
   hostnameSuffix: string;
   gateway: string;
   dns: string;
-  // the visitor's own browser settings — the installer wants a timezone,
-  // keyboard and country, and the wizard never asks for them
-  timezone: string;
-  locale: string;
+  // step 1: the keyboard, country and timezone the installer asks first
+  location: LocationPlan;
+}
+
+/** everything a node's file needs from the setup beyond the node itself */
+export function answerContext(state: PersistedState): AnswerContext {
+  return { hostnameSuffix: state.hostnameSuffix, gateway: state.gateway, dns: state.dns, location: state.location };
 }
 
 /** the node's fqdn — label plus the cluster's domain */
@@ -79,39 +59,30 @@ export function answerFileName(node: NodeInfo): string {
 // An answer file only needs a sliver of the plan, so each one also carries
 // the whole wizard state on a single comment line — the installer ignores
 // comments, and any node's file can reopen the setup on the start page.
-// Base64, so nothing a visitor typed can break out of the comment.
+// It holds root passwords, so it's the sealed envelope (see vault.ts),
+// base64 so nothing in it can break out of the comment.
 
 export const STATE_MARKER = "# proxmox.computer-state:";
 
-function toBase64(text: string): string {
-  const bytes = new TextEncoder().encode(text);
-  let binary = "";
-  // chunked: spreading a large array into one call overflows the stack
-  for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
-  return btoa(binary);
-}
-
-function fromBase64(encoded: string): string {
-  const binary = atob(encoded);
-  return new TextDecoder().decode(Uint8Array.from(binary, (ch) => ch.charCodeAt(0)));
-}
-
-/** the comment block that carries the setup */
-export function stateBlock(state: PersistedState): string {
+/** the comment block that carries the sealed setup */
+export function stateBlock(envelope: Envelope): string {
+  const encoded = btoa(JSON.stringify(envelope));
   return [
-    "# the whole setup, so proxmox.computer can reopen it: open the start page and pick",
-    '# "adjust a setup" with this file. the installer ignores comments — leave it in.',
-    `${STATE_MARKER} ${toBase64(JSON.stringify(state))}`,
+    "# the whole setup, encrypted with your passphrase, so proxmox.computer can reopen it:",
+    '# open the start page and pick "adjust a setup" with this file. the installer ignores comments.',
+    `${STATE_MARKER} ${encoded}`,
     "",
   ].join("\n");
 }
 
-export type ReadAnswerResult = { state: PersistedState } | { error: string };
+export type ReadAnswerResult = { envelope: Envelope } | { error: string };
+
+const DAMAGED = "the setup line in this file is damaged — was it edited? download a fresh copy to reopen it.";
 
 /**
- * The setup an answer file carries, or why it can't be reopened. Edits made
- * to the rest of the file (the password, the boot disk) are the file's own
- * business — only the embedded state is read back.
+ * The sealed setup an answer file carries, or why it can't be reopened.
+ * Edits to the rest of the file (the boot disk, say) are the file's own
+ * business — only the embedded setup is read back.
  */
 export function readAnswerToml(text: string): ReadAnswerResult {
   const line = text.split(/\r?\n/).find((l) => l.trim().startsWith(STATE_MARKER));
@@ -121,31 +92,58 @@ export function readAnswerToml(text: string): ReadAnswerResult {
         "this file has no proxmox.computer setup in it — it wasn't made here, or its state line was removed. there's nothing to reopen.",
     };
   }
-  let parsed: unknown;
+  let envelope: Envelope | null = null;
   try {
-    parsed = JSON.parse(fromBase64(line.trim().slice(STATE_MARKER.length).trim()));
+    envelope = parseEnvelope(JSON.parse(atob(line.trim().slice(STATE_MARKER.length).trim())));
   } catch {
-    return { error: "the setup line in this file is damaged — was it edited? download a fresh copy to reopen it." };
+    envelope = null;
   }
-  // a numbered save from another build — anything unnumbered is just damaged
-  const version = parsed && typeof parsed === "object" ? (parsed as { version?: unknown }).version : undefined;
+  if (!envelope) {
+    return {
+      error:
+        "this file's setup isn't in a form this version of proxmox.computer can read — it's damaged, or from an older version. download a fresh copy.",
+    };
+  }
+  return { envelope };
+}
+
+// startedOverFrom: the first step this build couldn't keep (see restoreSaved) — null when it kept all
+export type OpenAnswerResult = { state: PersistedState; opened: Opened; startedOverFrom: SavedStepId | null } | { error: string };
+
+/** decrypts a file's setup with its passphrase */
+export async function openAnswerSetup(envelope: Envelope, passphrase: string): Promise<OpenAnswerResult> {
+  let opened: Opened;
+  try {
+    opened = await open(envelope, passphrase);
+  } catch (e) {
+    if (e instanceof WrongPassphraseError) return { error: "that's not the passphrase this file was saved with" };
+    return { error: DAMAGED };
+  }
+  const value = opened.value;
+  // a save in another layout — anything unnumbered is just damaged. a step
+  // this build changed only starts that step over (see restoreSaved)
+  const version = value && typeof value === "object" ? (value as { version?: unknown }).version : undefined;
   if (typeof version === "number" && version !== STORAGE_VERSION) {
     return {
       error:
         "this file was made by a different version of proxmox.computer, and this one can't read its setup. start the setup again, or download a fresh copy.",
     };
   }
-  if (!isPersistedState(parsed)) {
-    return { error: "the setup line in this file is damaged — was it edited? download a fresh copy to reopen it." };
-  }
-  return { state: parsed };
+  const restored = restoreSaved(value);
+  if (!restored) return { error: DAMAGED };
+  return { state: restored.state, opened, startedOverFrom: restored.startedOverFrom };
 }
 
-/**
- * @param state the whole setup, embedded so the file can reopen it (see
- *   stateBlock); omit it for a bare answer file
- */
-export function buildAnswerToml(node: NodeInfo, ctx: AnswerContext, state?: PersistedState): string {
+/** what a node's file carries beyond the plan itself */
+export interface AnswerExtras {
+  // sha-512-crypt of the node's root password — null leaves the key out
+  passwordHash: string | null;
+  sshKeys: string[];
+  // the sealed setup (see stateBlock) — omitted for a bare answer file
+  envelope?: Envelope;
+}
+
+export function buildAnswerToml(node: NodeInfo, ctx: AnswerContext, extras: AnswerExtras): string {
   const fqdn = nodeFqdn(node, ctx.hostnameSuffix);
   const mailDomain = ctx.hostnameSuffix || "localhost";
   const bootSize = node.bootDiskSizeGb ? `${node.bootDiskSizeGb} gb` : "size not set";
@@ -154,25 +152,33 @@ export function buildAnswerToml(node: NodeInfo, ctx: AnswerContext, state?: Pers
   return [
     `# answer file for ${fqdn} — proxmox ve 8.4+ unattended install`,
     "# generated by proxmox.computer. before building the iso:",
-    "#   1. add a root password (see [global] below) — the installer refuses the file without one",
-    `#   2. replace ${DISK_PLACEHOLDER} in [disk-setup] with this node's boot disk`,
-    "#   3. proxmox-auto-install-assistant validate-answer this-file.toml",
-    "#   4. proxmox-auto-install-assistant prepare-iso proxmox-ve.iso --fetch-from iso --answer-file this-file.toml",
+    `#   1. replace ${DISK_PLACEHOLDER} in [disk-setup] with this node's boot disk`,
+    "#   2. proxmox-auto-install-assistant validate-answer this-file.toml",
+    "#   3. proxmox-auto-install-assistant prepare-iso proxmox-ve.iso --fetch-from iso --answer-file this-file.toml",
     "",
     "[global]",
-    `# from your browser's settings — change them if this node lives elsewhere`,
-    `keyboard = ${tomlString(keyboardFor(ctx.locale))}`,
-    `country = ${tomlString(countryFor(ctx.locale))}`,
-    `timezone = ${tomlString(ctx.timezone || "UTC")}`,
+    "# from step 1, location",
+    `keyboard = ${tomlString(ctx.location.keyboard)}`,
+    `country = ${tomlString(ctx.location.country)}`,
+    `timezone = ${tomlString(ctx.location.timezone || "UTC")}`,
     `fqdn = ${tomlString(fqdn)}`,
     "# where proxmox sends alerts — change it to an address you actually read",
     `mailto = ${tomlString(`root@${mailDomain}`)}`,
-    "# required: exactly one of these two. prefer the hash — generate it with",
-    "#   mkpasswd --method=yescrypt   (or: openssl passwd -6)",
-    '# root-password-hashed = "$y$j9T$..."',
-    '# root-password = "..."',
-    "# optional, and worth it — ansible will log in with this key later",
-    '# root-ssh-keys = ["ssh-ed25519 AAAA... you@laptop"]',
+    ...(extras.passwordHash
+      ? [
+          "# the root password from step 6, as a sha-512-crypt hash — never the password itself",
+          `root-password-hashed = ${tomlString(extras.passwordHash)}`,
+        ]
+      : [
+          "# required: no root password was set in step 6. add its hash — openssl passwd -6",
+          '# root-password-hashed = "$6$..."',
+        ]),
+    ...(extras.sshKeys.length > 0
+      ? [
+          "# root on this node accepts these keys — ansible logs in with them later",
+          `root-ssh-keys = [${extras.sshKeys.map(tomlString).join(", ")}]`,
+        ]
+      : []),
     "",
     "[network]",
     'source = "from-answer"',
@@ -192,11 +198,33 @@ export function buildAnswerToml(node: NodeInfo, ctx: AnswerContext, state?: Pers
     "# the wizard never names devices, so this won't match anything until you change it",
     `disk-list = [${tomlString(DISK_PLACEHOLDER)}]`,
     "",
-    ...(state ? [stateBlock(state)] : []),
+    ...(extras.envelope ? [stateBlock(extras.envelope)] : []),
   ].join("\n");
 }
 
 /** a link target that downloads the text as a toml file, no server needed */
 export function tomlDataUrl(toml: string): string {
   return `data:application/toml;charset=utf-8,${encodeURIComponent(toml)}`;
+}
+
+export interface PreparedAnswerFile {
+  fileName: string;
+  toml: string;
+}
+
+/**
+ * Every node's answer file, ready to download: each root password hashed,
+ * the setup sealed once with the session key. Async — hashing and
+ * encrypting both go through WebCrypto.
+ */
+export async function prepareAnswerFiles(state: PersistedState, ctx: AnswerContext = answerContext(state)): Promise<PreparedAnswerFile[]> {
+  const envelope = await seal(state);
+  const sshKeys = sshKeyLines(state.access.sshKeys);
+  return Promise.all(
+    state.nodes.map(async (node, i) => {
+      const password = rootPasswordFor(state.access, i);
+      const passwordHash = password ? await sha512Crypt(password) : null;
+      return { fileName: answerFileName(node), toml: buildAnswerToml(node, ctx, { passwordHash, sshKeys, envelope }) };
+    }),
+  );
 }

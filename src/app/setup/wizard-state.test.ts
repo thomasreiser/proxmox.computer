@@ -2,10 +2,12 @@ import { describe, expect, it, vi } from "vitest";
 import {
   MAX_BRIDGES_PER_INTERFACE,
   STORAGE_VERSION,
+  STEP_VERSIONS,
   NIC_PORT_LABEL,
   STORAGE_KEY,
   bridgeCountFor,
   bridgeKey,
+  firstStaleStep,
   bondModeLabel,
   effectivePort,
   interfacesFor,
@@ -16,26 +18,28 @@ import {
   isStoragePurpose,
   linkSpeedLabel,
   isSlowNic,
-  loadPersistedState,
   needsHostIpForPurposes,
   nicIndicesForInterface,
   nicSpeedLabel,
   nicSpeedsForInterface,
-  persistCurrentStep,
-  replacePersistedState,
   portChoices,
   portHint,
   validBonds,
   type PersistedState,
 } from "./wizard-state";
-import { bond, bridge, cluster, nics } from "./test-fixtures";
+import { loadPersistedState, persistCurrentStep, savePersistedState } from "./saved-state";
+import { accessPlan, bond, bridge, cluster, nics } from "./test-fixtures";
+import { defaultSoftwarePlan, newGuest, type GuestPlan } from "./software";
+import { lock } from "./vault";
 import { defaultBackupPlan } from "./backups";
 import { defaultStoragePlan } from "./derive";
 
 function persisted(overrides: Partial<PersistedState> = {}): PersistedState {
   return {
     version: STORAGE_VERSION,
+    stepVersions: { ...STEP_VERSIONS },
     currentStep: "network",
+    location: { country: "at", keyboard: "de", timezone: "Europe/Vienna" },
     nodeCount: "3",
     hostnameSuffix: "lab.lan",
     globalCidr: "10.0.0.0/24",
@@ -48,6 +52,8 @@ function persisted(overrides: Partial<PersistedState> = {}): PersistedState {
     clusterStorage: { ceph: true, zfs: false },
     storage: defaultStoragePlan(),
     backups: defaultBackupPlan(),
+    access: accessPlan(),
+    software: defaultSoftwarePlan(),
     identicalStorage: false,
     ...overrides,
   };
@@ -254,13 +260,22 @@ describe("isPersistedState", () => {
   });
 
   it("accepts every step this build can reopen on", () => {
-    for (const step of ["hardware", "network", "storage", "backups"] as const) {
+    for (const step of ["location", "hardware", "network", "storage", "backups", "access", "software", "install"] as const) {
       expect(isPersistedState(persisted({ currentStep: step }))).toBe(true);
     }
   });
 
   it.each([
-    ["currentStep", "install"],
+    ["currentStep", "deploy"],
+    ["location", undefined],
+    ["software", undefined],
+    ["software", { guests: [{ kind: "vm" }] }],
+    ["software", { guests: [] }],
+    ["software", { guests: [], kubernetes: { cephVolumes: "yes", volumeGb: "200" } }],
+    ["location", { country: "at", keyboard: "de" }],
+    ["access", undefined],
+    ["access", { ...accessPlan(), rootPasswords: "hunter2" }],
+    ["access", { ...accessPlan(), oidc: { ...accessPlan().oidc, usernameClaim: "nickname" } }],
     ["dns", undefined],
     ["dns", 53],
     ["backups", null],
@@ -277,6 +292,40 @@ describe("isPersistedState", () => {
     ["storage", null],
   ])("rejects a bad %s", (key, value) => {
     expect(isPersistedState({ ...persisted(), [key]: value })).toBe(false);
+  });
+
+  // a step saved under another version is only restored in part (see saved-state.ts)
+  it("rejects a save with any step at another version", () => {
+    expect(isPersistedState({ ...persisted(), stepVersions: { ...STEP_VERSIONS, backups: STEP_VERSIONS.backups + 1 } })).toBe(false);
+    const unversioned: Partial<PersistedState> = persisted();
+    delete unversioned.stepVersions;
+    expect(isPersistedState(unversioned)).toBe(false);
+  });
+
+  it("finds the first step it can't keep", () => {
+    expect(firstStaleStep(persisted())).toBeNull();
+    expect(firstStaleStep({ ...persisted(), stepVersions: { ...STEP_VERSIONS, storage: 0, access: 0 } })).toBe("storage");
+    expect(firstStaleStep({ ...persisted(), backups: { ...defaultBackupPlan(), target: "s3" } })).toBe("backups");
+    // step 3's part of a node, on step 2's nodes
+    const nodes = persisted().nodes.map((n, i) => (i === 1 ? { ...n, network: undefined } : n));
+    expect(firstStaleStep({ ...persisted(), nodes })).toBe("network");
+  });
+
+  // disk roles are step 4's, though they sit on step 2's disks
+  it("checks a disk's role as step 4's", () => {
+    const nodes = cluster(3, { additionalDisks: [{ type: "ssd", sizeGb: "1000", name: "d", role: "raid" as never }] });
+    expect(firstStaleStep({ ...persisted(), nodes })).toBe("storage");
+    const unsized = cluster(3, { additionalDisks: [{ type: "ssd", sizeGb: 1000 as never, name: "d", role: "" }] });
+    expect(firstStaleStep({ ...persisted(), nodes: unsized })).toBe("hardware");
+  });
+
+  it("takes a guest's kubernetes role only from the roles there are", () => {
+    const ctx = { nodes: cluster(3), clusterStorage: { ceph: true, zfs: false }, storage: defaultStoragePlan() };
+    const withRole = (k8sRole: string) =>
+      persisted({ software: { ...defaultSoftwarePlan(), guests: [{ ...newGuest("vm", [], ctx), k8sRole } as GuestPlan] } });
+    expect(isPersistedState(withRole("worker"))).toBe(true);
+    expect(isPersistedState(withRole(""))).toBe(true);
+    expect(isPersistedState(withRole("master"))).toBe(false);
   });
 
   it("rejects a storage plan missing one of its sections", () => {
@@ -310,41 +359,71 @@ describe("isPersistedState", () => {
 });
 
 describe("loadPersistedState", () => {
-  it("returns null when nothing is saved", () => {
-    expect(loadPersistedState()).toBeNull();
+  it("returns null when nothing is saved", async () => {
+    expect(await loadPersistedState()).toBeNull();
   });
 
-  it("round-trips a state it wrote", () => {
+  it("round-trips a state it saved", async () => {
     const state = persisted();
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-    expect(loadPersistedState()).toEqual(state);
+    expect(await savePersistedState(state)).toBe(true);
+    expect(await loadPersistedState()).toEqual(state);
   });
 
-  // corrupt json and a stale shape are the same outcome to the caller:
-  // "nothing usable saved", never a crash on mount.
-  it("returns null for unparseable json", () => {
+  // a stale shape, a plain save from before encryption and corrupt data
+  // are the same outcome to the caller: "nothing usable saved", no crash
+  it("returns null for a state from another version", async () => {
+    await savePersistedState({ ...persisted(), version: 1 });
+    expect(await loadPersistedState()).toBeNull();
+  });
+
+  it("returns null for a plain save from before encryption", async () => {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(persisted()));
+    expect(await loadPersistedState()).toBeNull();
+  });
+
+  it("returns null for unparseable data", async () => {
     window.localStorage.setItem(STORAGE_KEY, "{not json");
-    expect(loadPersistedState()).toBeNull();
+    expect(await loadPersistedState()).toBeNull();
   });
 
-  it("returns null for a state from another version", () => {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...persisted(), version: 1 }));
-    expect(loadPersistedState()).toBeNull();
+  it("returns null while the vault is locked", async () => {
+    await savePersistedState(persisted());
+    lock();
+    expect(await loadPersistedState()).toBeNull();
+  });
+});
+
+describe("savePersistedState", () => {
+  it("reports storage being unavailable", async () => {
+    const spy = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new Error("quota");
+    });
+    try {
+      expect(await savePersistedState(persisted())).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("saves nothing while the vault is locked", async () => {
+    lock();
+    expect(await savePersistedState(persisted())).toBe(false);
+    expect(window.localStorage.getItem(STORAGE_KEY)).toBeNull();
   });
 });
 
 describe("persistCurrentStep", () => {
-  it("updates only the step, leaving the rest of the save alone", () => {
+  it("updates only the step, leaving the rest of the save alone", async () => {
     const state = persisted({ currentStep: "hardware" });
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-    persistCurrentStep("network");
-    expect(loadPersistedState()).toEqual({ ...state, currentStep: "network" });
+    await savePersistedState(state);
+    await persistCurrentStep("network");
+    expect(await loadPersistedState()).toEqual({ ...state, currentStep: "network" });
   });
 
   // called from a preview route, which can be opened with nothing saved —
   // it must not create a partial state out of nowhere.
-  it("does nothing when there's no save to update", () => {
-    persistCurrentStep("network");
+  it("does nothing when there's no save to update", async () => {
+    await persistCurrentStep("network");
     expect(window.localStorage.getItem(STORAGE_KEY)).toBeNull();
   });
 });
@@ -352,29 +431,29 @@ describe("persistCurrentStep", () => {
 describe("when storage itself fails", () => {
   // private browsing, a full quota, or storage disabled outright: the
   // wizard must carry on, not throw on mount or on a step hand-off.
-  it("treats unreadable storage as nothing saved", () => {
+  it("treats unreadable storage as nothing saved", async () => {
     const spy = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
       throw new Error("SecurityError");
     });
     try {
-      expect(loadPersistedState()).toBeNull();
+      expect(await loadPersistedState()).toBeNull();
     } finally {
       spy.mockRestore();
     }
   });
 
-  it("swallows a failed write during a step hand-off", () => {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(persisted()));
+  it("swallows a failed write during a step hand-off", async () => {
+    await savePersistedState(persisted());
     const spy = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
       throw new Error("QuotaExceededError");
     });
     try {
-      expect(() => persistCurrentStep("storage")).not.toThrow();
+      await expect(persistCurrentStep("storage")).resolves.toBeUndefined();
     } finally {
       spy.mockRestore();
     }
     // the save it couldn't update is left exactly as it was
-    expect(loadPersistedState()?.currentStep).toBe("network");
+    expect((await loadPersistedState())?.currentStep).toBe("network");
   });
 });
 
@@ -412,22 +491,6 @@ describe("storage links", () => {
     expect(interfaceNameFor("bond-0", n, [bond({ name: "bond7", nicIndices: [0, 1] })])).toBe("bond7");
     // an id that no longer resolves falls back to itself
     expect(interfaceNameFor("bond-3", n, [])).toBe("bond-3");
-  });
-});
-
-describe("replacePersistedState", () => {
-  it("saves a setup the wizard will load", () => {
-    const state = persisted({ currentStep: "storage" });
-    expect(replacePersistedState(state)).toBe(true);
-    expect(loadPersistedState()).toEqual(state);
-  });
-
-  it("reports storage being unavailable", () => {
-    const spy = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
-      throw new Error("quota");
-    });
-    expect(replacePersistedState(persisted())).toBe(false);
-    spy.mockRestore();
   });
 });
 

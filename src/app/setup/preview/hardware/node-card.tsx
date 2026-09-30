@@ -101,7 +101,7 @@ export function NodeCard({ data }: NodeProps<NodeCardNode>) {
           <div key={i} className="pc-nodecard__nic">
             <span className="code pc-nodecard__nicname">{nic.name}</span>
             <span className="body-sm pc-nodecard__value--dim">{nicSpeedLabel(nic.speed)}</span>
-            {/* a real port: once step 2 draws a switch, its cable anchors
+            {/* a real port: once step 3 draws a switch, its cable anchors
                 here by this handle's id, no layout math required. */}
             <Handle
               type="source"

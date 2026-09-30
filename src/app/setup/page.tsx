@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { createContext, useContext, useEffect, useMemo, useState } from "react";
+import { useContext, useEffect, useMemo, useState } from "react";
 import wizardSteps from "@/data/wizard-steps.json";
 import {
   BOND_MODE_OPTIONS,
@@ -12,7 +12,6 @@ import {
   isStoragePurpose,
   bridgeKey,
   interfacesFor,
-  loadPersistedState,
   MAX_BRIDGES_PER_INTERFACE,
   MAX_NICS_PER_NODE,
   NIC_PORT_LABEL,
@@ -24,8 +23,8 @@ import {
   nicSpeedsForInterface,
   nicSpeedOptions,
   PURPOSE_NEEDS_HOST_IP,
-  STORAGE_KEY,
   STORAGE_VERSION,
+  STEP_VERSIONS,
   type AdditionalDisk,
   type BondConfig,
   type BondMode,
@@ -43,9 +42,12 @@ import {
   type StorageMode,
   enabledStorageModes,
   type BackupPlan,
+  type AccessPlan,
+  type OidcPlan,
   type StoragePlan,
   type WizardStepId,
 } from "./wizard-state";
+import { freshState, loadSaved, savePersistedState, startedOverNotice } from "./saved-state";
 import {
   cephDiskTypeHint,
   cephRawWithoutLargestNodeGb,
@@ -82,7 +84,6 @@ import {
   backupNicHint,
   backupSizeHint,
   maxGuestDataGb,
-  defaultBackupPlan,
   encryptionHint,
   maxBackupsKept,
   noBackupHint,
@@ -98,12 +99,53 @@ import {
 } from "./backups";
 import { ProblemList } from "./problem-list";
 import {
-  isValidIPv4,
+  MIN_ROOT_PASSWORD,
+  USERNAME_CLAIM_OPTIONS,
+  generatePassword,
+  oidcRedirectUris,
+  parseSshPublicKey,
+  passwordSshHint,
+  rootPasswordFor,
+  sharedRootPasswordHint,
+  sshKeyLines,
+  validateClientId,
+  validateIssuerUrl,
+  validateRealm,
+  validateRootPassword,
+  validateSshKeys,
+  type SshPublicKey,
+} from "./access";
+import { VaultGate } from "./vault-gate";
+import { CheckedTextField, CidrField, RevealErrorsContext } from "./form-fields";
+import { AnswerFilesPanel } from "./answer-files-panel";
+import { MeterBar } from "./meter-bar";
+import { bootDiskMeter, cephMeter, localMeter, memoryMeter, zfsMeter } from "./capacity";
+import {
+  haQuorumHint,
+  isKubernetesNode,
+  memoryHint,
+  newGuest,
+  nodeLoads,
+  storageHint,
+  storageUse,
+  type GuestPlan,
+  type SoftwarePlan,
+} from "./software";
+import { GuestCard } from "./guest-card";
+import { applyK8sLayout, cephReachHint, currentK8sLayout, type K8sLayout } from "./kubernetes";
+import { KubernetesPlanner, KubernetesStorage } from "./kubernetes-panel";
+import {
+  COUNTRY_OPTIONS,
+  KEYBOARD_OPTIONS,
+  detectLocation,
+  timezoneOptions,
+  type LocationPlan,
+} from "./location";
+import {
   subnetDetails,
   validateCidr,
   validateFriendlyName,
   validateHostCidr,
-  hostCidrMeaning,
   validateHostLabel,
   validateHostnameSuffix,
   validateIntRange,
@@ -143,7 +185,6 @@ import {
   defaultAdditionalDisk,
   defaultBondName,
   defaultNic,
-  defaultNode,
   deriveGateway,
   followGateway,
   deriveNodeCidr,
@@ -160,7 +201,6 @@ import {
   withHardwareOf,
   resizeNodes,
   applyStorageRoles,
-  defaultStoragePlan,
   type NodeNames,
   type PlaceholderSubnet,
 } from "./derive";
@@ -283,143 +323,7 @@ const CLUSTER_STORAGE_OPTIONS: { value: StorageMode; label: string; hint: string
 
 
 
-/**
- * Set once the visitor has tried to continue past problems: every field
- * then shows its error, touched or not. Fields normally hold an error back
- * until they've been left once, so an empty field nobody has visited looks
- * fine — which is exactly the field a blocked "continue" has to point at.
- */
-const RevealErrorsContext = createContext(false);
 
-// A text field for anything in ip or ip/prefix notation, with a small
-// toggle beside the input that expands a subnet breakdown (network,
-// broadcast, usable range, host count) — collapsed by default so it
-// doesn't clutter the form until someone actually wants it.
-function CidrField({
-  id,
-  label,
-  usedFor,
-  value,
-  onChange,
-  hint,
-  error,
-  placeholder,
-  defaultPrefix = 24,
-  required = false,
-  host = false,
-}: {
-  id: string;
-  label: string;
-  // a small sub-headline under the label — what this bridge is actually
-  // for (e.g. "ceph / storage traffic, backups"). NetworkAddressFields'
-  // per-node address fields are often the only place a bridge shows up
-  // once "identical network setup" moves its purpose checkboxes into the
-  // shared section, so a field like "vmbr3 — static ip for this node"
-  // otherwise gives no clue what vmbr3 even is without scrolling back up.
-  usedFor?: string;
-  value: string;
-  onChange: (value: string) => void;
-  hint: string;
-  error: string | null;
-  placeholder?: string;
-  // if the visitor types a bare ip with no /prefix, we fill one in on
-  // blur rather than leave it as a technically-different address. /32
-  // would be the "literal" reading of a bare ip, but it means "no other
-  // host shares this subnet" — wrong for a LAN-connected management ip
-  // or bridge, so default to the real subnet size instead.
-  defaultPrefix?: number;
-  required?: boolean;
-  // a static ip rather than a network: spells out what the prefix means,
-  // and flags a /32 (see hostCidrMeaning)
-  host?: boolean;
-}) {
-  const [showDetails, setShowDetails] = useState(false);
-  // an empty field's placeholder is just an example, not a value it
-  // already has — flagging it "required" in red before the visitor has
-  // ever touched it reads as "this is already wrong," when really
-  // nothing's been entered yet. hold off on error styling until they've
-  // actually left the field once.
-  const [touched, setTouched] = useState(false);
-  const info = subnetDetails(value);
-  const reveal = useContext(RevealErrorsContext);
-  const showError = (touched || reveal) && error;
-  const meaning = host && !showError ? hostCidrMeaning(value) : null;
-
-  function handleBlur() {
-    setTouched(true);
-    if (isValidIPv4(value)) onChange(`${value}/${defaultPrefix}`);
-  }
-
-  return (
-    <div className={`pc-field ${showError ? "pc-field--error" : ""}`}>
-      <label className="label pc-field__label" htmlFor={id}>
-        {label}
-        {required && <span className="pc-field__required"> *</span>}
-      </label>
-      {usedFor && <p className="meta pc-field__usedfor">used for: {usedFor}</p>}
-      <div className="pc-field__control">
-        <span className="code pc-field__bracket">#</span>
-        <input
-          id={id}
-          className="pc-field__input code"
-          type="text"
-          placeholder={placeholder ? `e.g. ${placeholder}` : undefined}
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-          onBlur={handleBlur}
-        />
-        <button
-          type="button"
-          className="pc-cmdline__copy"
-          disabled={!info}
-          onClick={() => setShowDetails((s) => !s)}
-          title={info ? "show subnet details" : "enter a valid ip/prefix to see subnet details"}
-        >
-          i
-        </button>
-      </div>
-      <span className="body-sm pc-field__hint">{showError ? error : hint}</span>
-      {meaning && (
-        <span className={`body-sm pc-field__meaning${meaning.warn ? " pc-field__meaning--warn" : ""}`}>
-          {meaning.warn && "⚠ "}
-          {meaning.text}
-        </span>
-      )}
-      {showDetails && info && (
-        <div className="pc-table-wrap">
-          <table className="pc-table">
-            <tbody>
-              <tr>
-                <td className="body-sm">network</td>
-                <td className="body-sm pc-table__num">{info.network}</td>
-              </tr>
-              <tr>
-                <td className="body-sm">netmask</td>
-                <td className="body-sm pc-table__num">
-                  {info.netmask} (/{info.prefix})
-                </td>
-              </tr>
-              <tr>
-                <td className="body-sm">usable range</td>
-                <td className="body-sm pc-table__num">
-                  {info.firstHost} – {info.lastHost}
-                </td>
-              </tr>
-              <tr>
-                <td className="body-sm">broadcast</td>
-                <td className="body-sm pc-table__num">{info.broadcast}</td>
-              </tr>
-              <tr>
-                <td className="body-sm">usable hosts</td>
-                <td className="body-sm pc-table__num">{info.usableHosts}</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      )}
-    </div>
-  );
-}
 
 
 
@@ -1392,7 +1296,7 @@ function NetworkStructureFields({
         ? "ceph and zfs replication need at least 2 nodes for real redundancy — add another node to unlock a cluster storage option here"
         : !anyStorageChosen
           ? "neither ceph nor zfs replication is ticked above — tick one there to unlock its nic purpose here"
-          : "ceph and zfs replication both need at least 1 disk beyond the boot disk on every node — add one in step 1 to unlock the storage you ticked"}
+          : "ceph and zfs replication both need at least 1 disk beyond the boot disk on every node — add one in step 2 to unlock the storage you ticked"}
     </p>
   );
 
@@ -1975,7 +1879,7 @@ function NetworkFields({
         ? "ceph and zfs replication need at least 2 nodes for real redundancy — add another node to unlock a cluster storage option here"
         : !anyStorageChosen
           ? "neither ceph nor zfs replication is ticked above — tick one there to unlock its nic purpose here"
-          : "ceph and zfs replication both need at least 1 disk beyond the boot disk on every node — add one in step 1 to unlock the storage you ticked"}
+          : "ceph and zfs replication both need at least 1 disk beyond the boot disk on every node — add one in step 2 to unlock the storage you ticked"}
     </p>
   );
 
@@ -2378,7 +2282,7 @@ function NetworkFields({
   );
 }
 
-// A pool name / storage id field. Step 3 asks for four of these and they
+// A pool name / storage id field. Step 4 asks for four of these and they
 // all answer to the same rules (see validatePoolName), so the validation
 // and the "don't go red before it's been touched" behavior live here
 // rather than being repeated per field.
@@ -2417,88 +2321,178 @@ function PoolNameField({
   );
 }
 
+
 /**
- * A free-text field with its own validator, for step 4's addresses, paths
- * and times. Like CidrField it holds its error back until the field has
- * been left once — or until a blocked "preview" reveals every error.
+ * A secret: hidden until asked, never echoed anywhere else. `onGenerate`
+ * adds a button that fills in a random one — and shows it, since a
+ * generated password is useless until it's been copied somewhere safe.
  */
-function CheckedTextField({
+function SecretField({
   id,
   label,
   hint,
   value,
-  placeholder,
-  validate,
   onChange,
+  validate,
+  onGenerate,
+  required = false,
 }: {
   id: string;
   label: string;
   hint: string;
   value: string;
-  placeholder?: string;
-  validate: (value: string) => string | null;
   onChange: (value: string) => void;
+  validate?: (value: string) => string | null;
+  onGenerate?: () => void;
+  required?: boolean;
 }) {
+  const [shown, setShown] = useState(false);
   const [touched, setTouched] = useState(false);
   const reveal = useContext(RevealErrorsContext);
-  const error = validate(value);
+  const error = validate ? validate(value) : null;
   const showError = (touched || reveal) && error;
   return (
     <div className={`pc-field ${showError ? "pc-field--error" : ""}`}>
       <label className="label pc-field__label" htmlFor={id}>
         {label}
-        <span className="pc-field__required"> *</span>
+        {required && <span className="pc-field__required"> *</span>}
       </label>
       <div className="pc-field__control">
-        <span className="code pc-field__bracket">$</span>
+        <span className="code pc-field__bracket">*</span>
         <input
           id={id}
           className="pc-field__input code"
-          type="text"
+          type={shown ? "text" : "password"}
+          autoComplete="new-password"
+          spellCheck={false}
           value={value}
-          placeholder={placeholder ? `e.g. ${placeholder}` : undefined}
           onChange={(e) => onChange(e.target.value)}
           onBlur={() => setTouched(true)}
         />
+        <button type="button" className="pc-field__action" onClick={() => setShown((v) => !v)}>
+          {shown ? "hide" : "show"}
+        </button>
+        {onGenerate && (
+          <button
+            type="button"
+            className="pc-field__action"
+            onClick={() => {
+              onGenerate();
+              setShown(true);
+              setTouched(true);
+            }}
+          >
+            generate
+          </button>
+        )}
       </div>
       <span className="body-sm pc-field__hint">{showError ? error : hint}</span>
     </div>
   );
 }
 
+/** the ssh keys box — every key it recognizes is listed back under it */
+function SshKeysField({ value, onChange }: { value: string; onChange: (value: string) => void }) {
+  const [touched, setTouched] = useState(false);
+  const reveal = useContext(RevealErrorsContext);
+  const error = validateSshKeys(value);
+  // a pasted private key is flagged at once, touched or not
+  const showError = (touched || reveal || /PRIVATE KEY/.test(value)) && error;
+  const keys = sshKeyLines(value)
+    .map(parseSshPublicKey)
+    .filter((k): k is SshPublicKey => k !== null);
+  return (
+    <div className={`pc-field ${showError ? "pc-field--error" : ""}`}>
+      <label className="label pc-field__label" htmlFor="ssh-keys">
+        ssh public key
+        <span className="pc-field__required"> *</span>
+      </label>
+      <div className="pc-field__control">
+        <textarea
+          id="ssh-keys"
+          className="pc-field__input pc-field__textarea code"
+          rows={3}
+          spellCheck={false}
+          placeholder="ssh-ed25519 AAAA… you@laptop"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          onBlur={() => setTouched(true)}
+        />
+      </div>
+      <span className="body-sm pc-field__hint">
+        {showError
+          ? error
+          : "the contents of your .pub file (cat ~/.ssh/id_ed25519.pub) — root on every node accepts it. one per line for several"}
+      </span>
+      {keys.length > 0 && !error && (
+        <ul className="pc-keylist">
+          {keys.map((k) => (
+            <li key={k.data} className="body-sm">
+              <span className="code">{k.type}</span> <span className="text-ink-muted">{k.comment || "(no comment)"}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+
 export default function Setup() {
+  return (
+    <VaultGate mode="wizard">
+      <Wizard />
+    </VaultGate>
+  );
+}
+
+function Wizard() {
   const router = useRouter();
-  const [currentStep, setCurrentStep] = useState<WizardStepId>("hardware");
-  const [nodeCount, setNodeCount] = useState("1");
-  const [hostnameSuffix, setHostnameSuffix] = useState("homelab.lan");
-  const [globalCidr, setGlobalCidr] = useState("10.0.10.0/24");
-  const [gateway, setGateway] = useState(() => deriveGateway("10.0.10.0/24"));
-  const [dns, setDns] = useState(() => deriveGateway("10.0.10.0/24"));
-  const [homelabVlan, setHomelabVlan] = useState("");
-  const [nodes, setNodes] = useState<NodeInfo[]>([defaultNode(0, "10.0.10.0/24")]);
-  const [identicalHardware, setIdenticalHardware] = useState(false);
-  const [identicalNetwork, setIdenticalNetwork] = useState(false);
-  const [clusterStorage, setClusterStorage] = useState<ClusterStorage>({ ceph: true, zfs: false });
-  const [storage, setStorage] = useState<StoragePlan>(defaultStoragePlan);
-  const [identicalStorage, setIdenticalStorage] = useState(false);
-  const [backups, setBackups] = useState<BackupPlan>(defaultBackupPlan);
+  // the same untouched setup a stale step starts over from (see saved-state.ts)
+  const [initial] = useState(freshState);
+  const [currentStep, setCurrentStep] = useState<WizardStepId>(initial.currentStep);
+  const [location, setLocation] = useState<LocationPlan>(initial.location);
+  const [nodeCount, setNodeCount] = useState(initial.nodeCount);
+  const [hostnameSuffix, setHostnameSuffix] = useState(initial.hostnameSuffix);
+  const [globalCidr, setGlobalCidr] = useState(initial.globalCidr);
+  const [gateway, setGateway] = useState(initial.gateway);
+  const [dns, setDns] = useState(initial.dns);
+  const [homelabVlan, setHomelabVlan] = useState(initial.homelabVlan);
+  const [nodes, setNodes] = useState<NodeInfo[]>(initial.nodes);
+  const [identicalHardware, setIdenticalHardware] = useState(initial.identicalHardware);
+  const [identicalNetwork, setIdenticalNetwork] = useState(initial.identicalNetwork);
+  const [clusterStorage, setClusterStorage] = useState<ClusterStorage>(initial.clusterStorage);
+  const [storage, setStorage] = useState<StoragePlan>(initial.storage);
+  const [identicalStorage, setIdenticalStorage] = useState(initial.identicalStorage);
+  const [backups, setBackups] = useState<BackupPlan>(initial.backups);
+  const [access, setAccess] = useState<AccessPlan>(initial.access);
+  const [software, setSoftware] = useState<SoftwarePlan>(initial.software);
+  // set when a save came back only in part: this build changed a step
+  const [startedOver, setStartedOver] = useState<string | null>(null);
+  // the kubernetes planner's layout while it's open — not saved: it only makes guests
+  const [k8sDraft, setK8sDraft] = useState<K8sLayout | null>(null);
   // gates the save effect below so it never fires with the initial default
   // state before the restore attempt (which may replace that state) has
   // actually run — otherwise a freshly-loaded save could get clobbered by
   // defaults on the very first render.
   const [hydrated, setHydrated] = useState(false);
 
-  // restore-on-mount: only ever applied if it passes isPersistedState in
-  // full; anything else (missing key, bad json, wrong shape, future schema
-  // change) silently leaves the clean defaults already in state untouched.
+  // restore-on-mount, through restoreSaved: kept whole when every step is
+  // current, kept up to the first changed step otherwise (and the visitor
+  // told so); anything else (missing key, bad json, another layout) leaves
+  // the clean defaults already in state untouched.
   // localStorage doesn't exist during ssr, so this has to run post-mount —
   // reading it during render would desync client output from the server
   // html. that's exactly what useEffect is for here, so the set-state-in-
   // effect rule's general advice doesn't apply to this specific case.
-  /* eslint-disable react-hooks/set-state-in-effect */
+   
   useEffect(() => {
-    const saved = loadPersistedState();
-    if (saved) {
+    let cancelled = false;
+    void loadSaved().then((restored) => {
+      if (cancelled) return;
+      const saved = restored?.state;
+      if (restored?.startedOverFrom) setStartedOver(startedOverNotice(restored.startedOverFrom));
+      if (saved) {
       setCurrentStep(saved.currentStep);
       setNodeCount(saved.nodeCount);
       setHostnameSuffix(saved.hostnameSuffix);
@@ -2513,57 +2507,80 @@ export default function Setup() {
       setStorage(saved.storage);
       setIdenticalStorage(saved.identicalStorage);
       setBackups(saved.backups);
-    }
-    setHydrated(true);
+      setAccess(saved.access);
+      // a location that started over is detected afresh, like a new setup's
+      setLocation(
+        restored.startedOverFrom === "location"
+          ? detectLocation(navigator.language, Intl.DateTimeFormat().resolvedOptions().timeZone)
+          : saved.location,
+      );
+      setSoftware(saved.software);
+      } else {
+        // a new setup starts from the browser it's being made in
+        setLocation(detectLocation(navigator.language, Intl.DateTimeFormat().resolvedOptions().timeZone));
+      }
+      setHydrated(true);
+    });
+    return () => {
+      cancelled = true;
+    };
   }, []);
-  /* eslint-enable react-hooks/set-state-in-effect */
+   
+
+  // the whole setup as it stands — what's saved, what the gate checks, and
+  // what step 8's answer files are built from
+  const snapshot = useMemo<PersistedState>(
+    () => ({
+      version: STORAGE_VERSION,
+      stepVersions: { ...STEP_VERSIONS },
+      currentStep,
+      location,
+      nodeCount,
+      hostnameSuffix,
+      globalCidr,
+      gateway,
+      dns,
+      homelabVlan,
+      nodes,
+      identicalHardware,
+      identicalNetwork,
+      clusterStorage,
+      storage,
+      identicalStorage,
+      backups,
+      // a removed node's password isn't kept around
+      access: { ...access, rootPasswords: nodes.map((_, i) => rootPasswordFor(access, i)) },
+      software,
+    }),
+    [
+      currentStep,
+      location,
+      nodeCount,
+      hostnameSuffix,
+      globalCidr,
+      gateway,
+      dns,
+      homelabVlan,
+      nodes,
+      identicalHardware,
+      identicalNetwork,
+      clusterStorage,
+      storage,
+      identicalStorage,
+      backups,
+      access,
+      software,
+    ],
+  );
 
   // debounced autosave — only once hydrated, so this never overwrites a
   // save with the pre-restore defaults.
   useEffect(() => {
     if (!hydrated) return;
-    const handle = setTimeout(() => {
-      try {
-        const payload: PersistedState = {
-          version: STORAGE_VERSION,
-          currentStep,
-          nodeCount,
-          hostnameSuffix,
-          globalCidr,
-          gateway,
-          dns,
-          homelabVlan,
-          nodes,
-          identicalHardware,
-          identicalNetwork,
-          clusterStorage,
-          storage,
-          identicalStorage,
-          backups,
-        };
-        window.localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
-      } catch {
-        // storage full, disabled, or unavailable — just skip persisting.
-      }
-    }, 300);
+    // encrypted on its way out (see vault.ts); a refused save just skips
+    const handle = setTimeout(() => void savePersistedState(snapshot), 300);
     return () => clearTimeout(handle);
-  }, [
-    hydrated,
-    currentStep,
-    nodeCount,
-    hostnameSuffix,
-    globalCidr,
-    gateway,
-    dns,
-    homelabVlan,
-    nodes,
-    identicalHardware,
-    identicalNetwork,
-    clusterStorage,
-    storage,
-    identicalStorage,
-    backups,
-  ]);
+  }, [hydrated, snapshot]);
 
   const quorumHint = useMemo(() => quorumHintFor(nodes.length), [nodes.length]);
   const cpuHint = useMemo(() => cpuHintFor(nodes), [nodes]);
@@ -2613,7 +2630,7 @@ export default function Setup() {
     [activeStorage.ceph, activeStorage.zfs],
   );
 
-  // ── step 3 derivations ────────────────────────────────────────────────
+  // ── step 4 derivations ────────────────────────────────────────────────
   // the zfs layouts every node can build, and the one in effect — the
   // picker lists only those, and everything below reads the effective one
   const zfsMembers = useMemo(() => minPoolMembers(planNodes), [planNodes]);
@@ -2666,8 +2683,8 @@ export default function Setup() {
   // stops applying, and comes back if it's offered again
   /* eslint-enable react-hooks/set-state-in-effect */
 
-  // ── step 4 derivations ───────────────────────────────────────────────
-  // the most a full backup can reach — the storage planned in step 3, full
+  // ── step 5 derivations ───────────────────────────────────────────────
+  // the most a full backup can reach — the storage planned in step 4, full
   const guestDataGb = useMemo(() => maxGuestDataGb(nodes, clusterStorage, storage), [nodes, clusterStorage, storage]);
   const backupHints = [
     noBackupHint(backups.target),
@@ -2680,25 +2697,39 @@ export default function Setup() {
   ];
   const setBackup = (patch: Partial<BackupPlan>) => setBackups((b) => ({ ...b, ...patch }));
 
+  // ── step 6 derivations ───────────────────────────────────────────────
+  const setOidc = (patch: Partial<OidcPlan>) => setAccess((a) => ({ ...a, oidc: { ...a.oidc, ...patch } }));
+  const setRootPassword = (index: number, value: string) =>
+    setAccess((a) => ({ ...a, rootPasswords: nodes.map((_, i) => (i === index ? value : rootPasswordFor(a, i))) }));
+  const accessHints = [passwordSshHint(access.disablePasswordSsh), sharedRootPasswordHint(access, nodes.length)];
+
+  // ── step 7 derivations ───────────────────────────────────────────────
+  const guestCtx = useMemo(
+    () => ({ nodes, clusterStorage, storage, kubernetes: software.kubernetes }),
+    [nodes, clusterStorage, storage, software.kubernetes],
+  );
+  const guests = software.guests;
+  const k8sPlanned = guests.filter(isKubernetesNode).length;
+  const addGuests = (added: GuestPlan[]) => setSoftware((sw) => ({ ...sw, guests: [...sw.guests, ...added] }));
+  const replaceGuest = (next: GuestPlan) => setSoftware((sw) => ({ ...sw, guests: sw.guests.map((g) => (g.id === next.id ? next : g)) }));
+  const removeGuest = (id: string) => setSoftware((sw) => ({ ...sw, guests: sw.guests.filter((g) => g.id !== id) }));
+  const applyK8s = (layout: K8sLayout) => {
+    setSoftware((sw) => ({ ...sw, guests: applyK8sLayout(layout, sw.guests, guestCtx) }));
+    setK8sDraft(null);
+  };
+  const softwareHints = [
+    ...nodeLoads(guests, nodes).map((load) =>
+      memoryHint(load, nodes[load.nodeIndex]?.network.hostLabel || nodes[load.nodeIndex]?.name || `node ${load.nodeIndex + 1}`),
+    ),
+    ...storageUse(guests, guestCtx).map(storageHint),
+    haQuorumHint(guests, nodes.length),
+    cephReachHint(guests, guestCtx),
+  ];
+
   // ── the gate ──────────────────────────────────────────────────────────
   // everything blocking this step and the ones before it, from the live
   // form — the same checks the preview pages apply to the saved state
-  const blocking = useMemo(
-    () =>
-      problemsUpTo(currentStep, {
-        nodeCount,
-        nodes,
-        hostnameSuffix,
-        globalCidr,
-        gateway,
-        dns,
-        homelabVlan,
-        clusterStorage,
-        storage,
-        backups,
-      }),
-    [currentStep, nodeCount, nodes, hostnameSuffix, globalCidr, gateway, dns, homelabVlan, clusterStorage, storage, backups],
-  );
+  const blocking = useMemo(() => problemsUpTo(currentStep, snapshot), [currentStep, snapshot]);
   // set by a blocked "preview": from then on every field shows its error,
   // and the list below says what's left. cleared on a step switch, so
   // the next step starts without red it hasn't earned yet.
@@ -2708,6 +2739,15 @@ export default function Setup() {
     setRevealErrors(false);
   }, [currentStep]);
   /* eslint-enable react-hooks/set-state-in-effect */
+
+  // step 1 has nothing to draw, so it moves on directly — through the same gate
+  function tryNext(next: WizardStepId) {
+    if (blocking.length > 0) {
+      setRevealErrors(true);
+      return;
+    }
+    setCurrentStep(next);
+  }
 
   function tryPreview(step: WizardStepId) {
     if (blocking.length > 0) {
@@ -2825,7 +2865,7 @@ export default function Setup() {
     );
   }
 
-  // step 3's only per-node edit. under "identical storage" the role is
+  // step 4's only per-node edit. under "identical storage" the role is
   // written to the disk at the same position on every node, which is the
   // only correspondence the nodes reliably share (see applyStorageRoles).
   function updateDiskRole(nodeIndex: number, diskIndex: number, role: DiskRole) {
@@ -3095,7 +3135,7 @@ export default function Setup() {
   return (
     <div className="pc-root flex min-h-full flex-col">
       <header className="border-b border-border">
-        <div className="mx-auto flex max-w-4xl items-center justify-between px-6 py-5">
+        <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-5">
           <Link href="/" className="flex items-center gap-2.5">
             <span className="code flex h-7 w-7 items-center justify-center bg-accent font-bold text-on-accent">
               {">"}
@@ -3127,10 +3167,118 @@ export default function Setup() {
             </div>
           </div>
 
+          {startedOver && (
+            <div className="pc-callout pc-callout--info" role="status">
+              <span className="code pc-callout__glyph">#</span>
+              <div className="pc-callout__body">
+                <p className="body-sm pc-callout__text">{startedOver}</p>
+                <div className="mt-3">
+                  <button type="button" className="pc-btn pc-btn--ghost" onClick={() => setStartedOver(null)}>
+                    got it
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
           <RevealErrorsContext.Provider value={revealErrors}>
+          {currentStep === "location" && (
+            <div className="pc-stepflow__card">
+              <p className="meta pc-stepflow__meta"># step 1 of 8</p>
+              <h2 className="h2 pc-stepflow__title">location</h2>
+              <p className="body pc-stepflow__intro">
+                Where the cluster lives. The installer asks these three before
+                anything else, and they&apos;re set the same on every node —
+                picked up from this browser, so check they match the machines.
+              </p>
+
+              <div className="pc-stepflow__fields">
+                <div className="pc-field">
+                  <label className="label pc-field__label" htmlFor="location-country">
+                    country
+                  </label>
+                  <div className="pc-field__control">
+                    <select
+                      id="location-country"
+                      className="pc-field__input code"
+                      value={location.country}
+                      onChange={(e) => setLocation((l) => ({ ...l, country: e.target.value }))}
+                    >
+                      {COUNTRY_OPTIONS.map((c) => (
+                        <option key={c.code} value={c.code}>
+                          {c.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <span className="body-sm pc-field__hint">picks the installer&apos;s nearest package mirror</span>
+                </div>
+
+                <div className="pc-field">
+                  <label className="label pc-field__label" htmlFor="location-keyboard">
+                    keyboard
+                  </label>
+                  <div className="pc-field__control">
+                    <select
+                      id="location-keyboard"
+                      className="pc-field__input code"
+                      value={location.keyboard}
+                      onChange={(e) => setLocation((l) => ({ ...l, keyboard: e.target.value }))}
+                    >
+                      {KEYBOARD_OPTIONS.map((k) => (
+                        <option key={k.value} value={k.value}>
+                          {k.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <span className="body-sm pc-field__hint">
+                    the layout of the keyboard plugged into the nodes — it&apos;s what you&apos;ll type the root
+                    password on at the console
+                  </span>
+                </div>
+
+                <div className="pc-field">
+                  <label className="label pc-field__label" htmlFor="location-timezone">
+                    timezone
+                  </label>
+                  <div className="pc-field__control">
+                    <select
+                      id="location-timezone"
+                      className="pc-field__input code"
+                      value={location.timezone}
+                      onChange={(e) => setLocation((l) => ({ ...l, timezone: e.target.value }))}
+                    >
+                      {timezoneOptions().map((z) => (
+                        <option key={z} value={z}>
+                          {z}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <span className="body-sm pc-field__hint">
+                    the nodes&apos; clocks — log timestamps, and when the nightly backup from step 5 runs
+                  </span>
+                </div>
+              </div>
+
+              {revealErrors && <ProblemList problems={blocking} step={currentStep} />}
+              <div className="pc-stepflow__nav">
+                <Link href="/" className="pc-btn pc-btn--ghost">
+                  ← back to overview
+                </Link>
+                <button type="button" className="pc-btn pc-btn--primary" onClick={() => tryNext("hardware")}>
+                  <span className="pc-btn__bracket">[</span>
+                  next
+                  <span className="pc-btn__bracket">]</span>
+                </button>
+              </div>
+            </div>
+          )}
+
           {currentStep === "hardware" && (
             <div className="pc-stepflow__card">
-              <p className="meta pc-stepflow__meta"># step 1 of 5</p>
+              <p className="meta pc-stepflow__meta"># step 2 of 8</p>
               <h2 className="h2 pc-stepflow__title">hardware</h2>
               <p className="body pc-stepflow__intro">
                 Tell us about every node. proxmox.computer uses this to plan
@@ -3256,9 +3404,11 @@ export default function Setup() {
 
               {revealErrors && <ProblemList problems={blocking} step={currentStep} />}
               <div className="pc-stepflow__nav">
-                <Link href="/" className="pc-btn pc-btn--ghost">
-                  ← back to overview
-                </Link>
+                <button type="button" className="pc-btn" onClick={() => setCurrentStep("location")}>
+                  <span className="pc-btn__bracket">[</span>
+                  back
+                  <span className="pc-btn__bracket">]</span>
+                </button>
                 <button
                   type="button"
                   className="pc-btn pc-btn--primary"
@@ -3274,7 +3424,7 @@ export default function Setup() {
 
           {currentStep === "network" && (
             <div className="pc-stepflow__card">
-              <p className="meta pc-stepflow__meta"># step 2 of 5</p>
+              <p className="meta pc-stepflow__meta"># step 3 of 8</p>
               <h2 className="h2 pc-stepflow__title">network</h2>
               <p className="body pc-stepflow__intro">
                 Set the domain and address range for your homelab.
@@ -3431,7 +3581,7 @@ export default function Setup() {
                               {blockedByOther && (
                                 <span className="body-sm pc-checkbox__hint">
                                   needs a second disk beyond boot on every node — {other} takes one, and ceph and
-                                  zfs can&apos;t share a disk. add one in step 1 to run both.
+                                  zfs can&apos;t share a disk. add one in step 2 to run both.
                                 </span>
                               )}
                               {flagSlow && (
@@ -3442,7 +3592,7 @@ export default function Setup() {
                                     : slowForCeph.map((n) => n.network.hostLabel || n.name).join(", ")}
                                   . ceph acknowledges a write only once the other nodes have it, so the
                                   slowest node&apos;s link sets the disk latency every vm in the cluster
-                                  sees — add a 10 gbe nic in step 1, or use zfs with replication
+                                  sees — add a 10 gbe nic in step 2, or use zfs with replication
                                   instead.
                                 </span>
                               )}
@@ -3455,7 +3605,7 @@ export default function Setup() {
                                   {clusterStorage.ceph ? " once ceph takes one" : ""}, so each zfs pool there
                                   can only be a single-disk stripe — no redundancy within the node. one failed
                                   disk loses that node&apos;s whole pool, and its guests come back from another
-                                  node only as of the last replication run. add a disk per node in step 1 to
+                                  node only as of the last replication run. add a disk per node in step 2 to
                                   mirror them.
                                 </span>
                               )}
@@ -3471,7 +3621,7 @@ export default function Setup() {
                     )}
                     {!clusterStorageAvailable && (
                       <p className="body-sm pc-field__hint">
-                        ceph and zfs replication both need at least 1 disk beyond the boot disk on every node — your worst-equipped node currently has {minDisks}, so it sets the limit for the whole cluster. add one in step 1 to unlock either option here
+                        ceph and zfs replication both need at least 1 disk beyond the boot disk on every node — your worst-equipped node currently has {minDisks}, so it sets the limit for the whole cluster. add one in step 2 to unlock either option here
                       </p>
                     )}
                     {/* ceph's requirements scale with the number of osds you
@@ -3617,10 +3767,10 @@ export default function Setup() {
 
           {currentStep === "storage" && (
             <div className="pc-stepflow__card">
-              <p className="meta pc-stepflow__meta"># step 3 of 5</p>
+              <p className="meta pc-stepflow__meta"># step 4 of 8</p>
               <h2 className="h2 pc-stepflow__title">storage</h2>
               <p className="body pc-stepflow__intro">
-                Step 1 asked what disks each node has. This decides what
+                Step 2 asked what disks each node has. This decides what
                 they&apos;re <em>for</em> — which ones join the cluster&apos;s
                 shared storage, which stay local to their node, and how each
                 pool is laid out.
@@ -3635,7 +3785,7 @@ export default function Setup() {
                         Neither ceph nor zfs replication is on, so there&apos;s
                         no cluster-wide pool to build — every disk below is
                         either this node&apos;s own storage or left alone.
-                        Tick one in step 2 to plan a shared pool here
+                        Tick one in step 3 to plan a shared pool here
                         instead.
                       </p>
                     </div>
@@ -3702,7 +3852,7 @@ export default function Setup() {
 
                       {node.additionalDisks.length === 0 ? (
                         <p className="body-sm text-ink-muted">
-                          no disks beyond boot on this node — add some in step 1 to have anything to plan here.
+                          no disks beyond boot on this node — add some in step 2 to have anything to plan here.
                         </p>
                       ) : (
                         node.additionalDisks.map((disk, diskIndex) => (
@@ -3733,7 +3883,7 @@ export default function Setup() {
                               <p className="body-sm pc-field__hint">
                                 it&apos;s this node&apos;s only disk beyond boot, so it has to join the pool — left
                                 out, the node would store nothing for{" "}
-                                {soleMode === "ceph" ? "ceph" : "zfs replication"}. add a second disk in step 1
+                                {soleMode === "ceph" ? "ceph" : "zfs replication"}. add a second disk in step 2
                                 to keep one for local storage.
                               </p>
                             )}
@@ -3943,7 +4093,7 @@ export default function Setup() {
                         {zfsChoices.length < ZFS_RAID_OPTIONS.length && (
                           <p className="body-sm pc-field__hint">
                             with {zfsMembers} pool {zfsMembers === 1 ? "disk" : "disks"} on the thinnest node, these are
-                            the layouts every node can build — add disks in step 1 for the others.
+                            the layouts every node can build — add disks in step 2 for the others.
                           </p>
                         )}
                       </fieldset>
@@ -4054,7 +4204,7 @@ export default function Setup() {
 
           {currentStep === "backups" && (
             <div className="pc-stepflow__card">
-              <p className="meta pc-stepflow__meta"># step 4 of 5</p>
+              <p className="meta pc-stepflow__meta"># step 5 of 8</p>
               <h2 className="h2 pc-stepflow__title">backups</h2>
               <p className="body pc-stepflow__intro">
                 Ceph and zfs replication keep guests running through a failed
@@ -4271,11 +4421,351 @@ export default function Setup() {
               </div>
             </div>
           )}
+          {currentStep === "access" && (
+            <div className="pc-stepflow__card">
+              <p className="meta pc-stepflow__meta"># step 6 of 8</p>
+              <h2 className="h2 pc-stepflow__title">access</h2>
+              <p className="body pc-stepflow__intro">
+                How you get into the nodes once they&apos;re installed: one ssh
+                key for all of them, a root password each, and — if you run an
+                identity provider — single sign-on for the web ui. Everything
+                here is encrypted with your passphrase before it&apos;s saved.
+              </p>
+
+              <div className="pc-stepflow__fields">
+                <SshKeysField value={access.sshKeys} onChange={(sshKeys) => setAccess((a) => ({ ...a, sshKeys }))} />
+
+                <label className="pc-checkbox">
+                  <input
+                    type="checkbox"
+                    checked={access.disablePasswordSsh}
+                    onChange={(e) => setAccess((a) => ({ ...a, disablePasswordSsh: e.target.checked }))}
+                  />
+                  <span className="pc-checkbox__box" />
+                  <span>
+                    <span className="code pc-checkbox__label">turn off password logins over ssh</span>
+                    <span className="body-sm pc-checkbox__hint">
+                      ssh takes the key only — the web ui and the console still take the root password. applied when
+                      the cluster is configured, after the install
+                    </span>
+                  </span>
+                </label>
+
+                <div className="flex flex-col border border-border bg-surface-100 p-5" style={{ gap: "var(--space-4)" }}>
+                  <p className="label text-ink-muted">root passwords</p>
+                  <p className="body-sm text-ink-muted">
+                    one per node, for the web ui (root@pam) and the console. the answer files only ever carry a
+                    hash of it.
+                  </p>
+                  {nodes.map((node, i) => (
+                    <SecretField
+                      key={i}
+                      id={`rootpw-${i}`}
+                      label={`root password — ${node.network.hostLabel || node.name}`}
+                      hint={`at least ${MIN_ROOT_PASSWORD} characters — or generate one, and keep it in your password manager`}
+                      value={rootPasswordFor(access, i)}
+                      validate={validateRootPassword}
+                      onChange={(value) => setRootPassword(i, value)}
+                      onGenerate={() => setRootPassword(i, generatePassword())}
+                      required
+                    />
+                  ))}
+                </div>
+
+                <label className="pc-checkbox">
+                  <input
+                    type="checkbox"
+                    checked={access.oidc.enabled}
+                    onChange={(e) => setOidc({ enabled: e.target.checked })}
+                  />
+                  <span className="pc-checkbox__box" />
+                  <span>
+                    <span className="code pc-checkbox__label">sign in to the web ui with oidc (optional)</span>
+                    <span className="body-sm pc-checkbox__hint">
+                      log in through your identity provider — authentik, keycloak, authelia… root@pam keeps working
+                      alongside it, for when the provider is down
+                    </span>
+                  </span>
+                </label>
+
+                {access.oidc.enabled && (
+                  <div className="flex flex-col border border-border bg-surface-100 p-5" style={{ gap: "var(--space-4)" }}>
+                    <p className="label text-ink-muted">openid connect</p>
+                    <CheckedTextField
+                      id="oidc-realm"
+                      label="realm"
+                      hint="the name people pick on the login screen — also the part after the @ in their user name"
+                      value={access.oidc.realm}
+                      validate={validateRealm}
+                      onChange={(realm) => setOidc({ realm })}
+                    />
+                    <CheckedTextField
+                      id="oidc-issuer"
+                      label="issuer url"
+                      hint="your provider's issuer — proxmox finds everything else under /.well-known/openid-configuration"
+                      placeholder="https://auth.example.com/realms/homelab"
+                      value={access.oidc.issuerUrl}
+                      validate={validateIssuerUrl}
+                      onChange={(issuerUrl) => setOidc({ issuerUrl })}
+                    />
+                    <CheckedTextField
+                      id="oidc-client-id"
+                      label="client id"
+                      hint="the client you created for proxmox at the provider"
+                      placeholder="proxmox"
+                      value={access.oidc.clientId}
+                      validate={validateClientId}
+                      onChange={(clientId) => setOidc({ clientId })}
+                    />
+                    <SecretField
+                      id="oidc-client-secret"
+                      label="client secret"
+                      hint="leave blank for a public client — encrypted like the passwords"
+                      value={access.oidc.clientSecret}
+                      onChange={(clientSecret) => setOidc({ clientSecret })}
+                    />
+                    <fieldset className="pc-radio-group" style={{ border: 0, margin: 0, padding: 0 }}>
+                      <legend className="label pc-radio-group__legend">user name from</legend>
+                      {USERNAME_CLAIM_OPTIONS.map((opt) => (
+                        <label key={opt.value} className="pc-radio">
+                          <input
+                            type="radio"
+                            name="oidc-claim"
+                            checked={access.oidc.usernameClaim === opt.value}
+                            onChange={() => setOidc({ usernameClaim: opt.value })}
+                          />
+                          <span className="pc-radio__box" />
+                          <span>
+                            <span className="code pc-radio__label">{opt.label}</span>
+                            <span className="body-sm pc-checkbox__hint">{opt.hint}</span>
+                          </span>
+                        </label>
+                      ))}
+                    </fieldset>
+                    <label className="pc-checkbox">
+                      <input
+                        type="checkbox"
+                        checked={access.oidc.autocreate}
+                        onChange={(e) => setOidc({ autocreate: e.target.checked })}
+                      />
+                      <span className="pc-checkbox__box" />
+                      <span>
+                        <span className="code pc-checkbox__label">create users on first login</span>
+                        <span className="body-sm pc-checkbox__hint">
+                          they start with no permissions — grant them in the proxmox ui
+                        </span>
+                      </span>
+                    </label>
+                    <label className="pc-checkbox">
+                      <input
+                        type="checkbox"
+                        checked={access.oidc.isDefault}
+                        onChange={(e) => setOidc({ isDefault: e.target.checked })}
+                      />
+                      <span className="pc-checkbox__box" />
+                      <span>
+                        <span className="code pc-checkbox__label">preselect it on the login screen</span>
+                        <span className="body-sm pc-checkbox__hint">root@pam is still one click away</span>
+                      </span>
+                    </label>
+                    <div className="pc-callout pc-callout--info">
+                      <span className="code pc-callout__glyph">#</span>
+                      <div className="pc-callout__body">
+                        <p className="body-sm pc-callout__text">
+                          register these redirect uris with the client at your provider — proxmox sends people back
+                          to whichever node they logged in on:
+                        </p>
+                        <ul className="pc-urilist">
+                          {oidcRedirectUris(nodes, hostnameSuffix).map((uri) => (
+                            <li key={uri} className="code body-sm">
+                              {uri}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {accessHints
+                  .filter((hint): hint is Hint => hint !== null)
+                  .map((hint, i) => (
+                    <div key={i} className={`pc-callout pc-callout--${hint.tone}`}>
+                      <span className="code pc-callout__glyph">{hint.glyph}</span>
+                      <div className="pc-callout__body">
+                        <p className="body-sm pc-callout__text">{hint.text}</p>
+                      </div>
+                    </div>
+                  ))}
+              </div>
+
+              {revealErrors && <ProblemList problems={blocking} step={currentStep} />}
+              <div className="pc-stepflow__nav">
+                <button type="button" className="pc-btn" onClick={() => setCurrentStep("backups")}>
+                  <span className="pc-btn__bracket">[</span>
+                  back
+                  <span className="pc-btn__bracket">]</span>
+                </button>
+                <button type="button" className="pc-btn pc-btn--primary" onClick={() => tryPreview("access")}>
+                  <span className="pc-btn__bracket">[</span>
+                  preview
+                  <span className="pc-btn__bracket">]</span>
+                </button>
+              </div>
+            </div>
+          )}
+          {currentStep === "software" && (
+            <div className="pc-stepflow__card">
+              <p className="meta pc-stepflow__meta"># step 7 of 8</p>
+              <h2 className="h2 pc-stepflow__title">software</h2>
+              <p className="body pc-stepflow__intro">
+                The vms and containers the cluster runs. Optional — skip it, and
+                add them later. Every choice below comes from the steps before:
+                a guest can only live on storage step 4 builds and join a bridge
+                step 3 set up for vm traffic. They&apos;re created when the
+                cluster is configured, after the install.
+              </p>
+
+              <div className="pc-stepflow__fields">
+                <div className="flex flex-wrap" style={{ gap: "var(--space-2)" }}>
+                  <button type="button" className="pc-btn" onClick={() => addGuests([newGuest("vm", guests, guestCtx)])}>
+                    <span className="pc-btn__bracket">[</span>+ vm
+                    <span className="pc-btn__bracket">]</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="pc-btn"
+                    onClick={() => addGuests([newGuest("container", guests, guestCtx)])}
+                  >
+                    <span className="pc-btn__bracket">[</span>+ container
+                    <span className="pc-btn__bracket">]</span>
+                  </button>
+                  <button type="button" className="pc-btn" onClick={() => setK8sDraft(currentK8sLayout(guests, nodes.length))}>
+                    <span className="pc-btn__bracket">[</span>
+                    {k8sPlanned > 0 ? "re-plan kubernetes" : "+ kubernetes"}
+                    <span className="pc-btn__bracket">]</span>
+                  </button>
+                </div>
+
+                {k8sDraft ? (
+                  <KubernetesPlanner
+                    layout={k8sDraft}
+                    nodes={nodes}
+                    planned={k8sPlanned}
+                    onChange={setK8sDraft}
+                    onApply={() => applyK8s(k8sDraft)}
+                    onCancel={() => setK8sDraft(null)}
+                  />
+                ) : (
+                  <KubernetesStorage
+                    guests={guests}
+                    cephBuilt={activeStorage.ceph}
+                    plan={software.kubernetes}
+                    onChange={(patch) => setSoftware((sw) => ({ ...sw, kubernetes: { ...sw.kubernetes, ...patch } }))}
+                  />
+                )}
+
+                {/* what's left to plan with — live, as guests come and go */}
+                <div className="pc-roomleft">
+                  <p className="label text-ink-muted">room left</p>
+                  {cephMeter(guests, guestCtx) && <MeterBar meter={cephMeter(guests, guestCtx)!} unit="gb" compact />}
+                  <div className="pc-roomleft__nodes">
+                    {nodes.map((node, i) => (
+                      <div key={i} className="pc-roomleft__node">
+                        <p className="code pc-roomleft__host">{node.network.hostLabel || node.name}</p>
+                        <MeterBar meter={memoryMeter(i, guests, guestCtx)} unit="gib" compact />
+                        {zfsMeter(i, guests, guestCtx) && <MeterBar meter={zfsMeter(i, guests, guestCtx)!} unit="gb" compact />}
+                        {localMeter(i, guests, guestCtx) && <MeterBar meter={localMeter(i, guests, guestCtx)!} unit="gb" compact />}
+                        <MeterBar meter={bootDiskMeter(i, guests, guestCtx)} unit="gb" compact />
+                      </div>
+                    ))}
+                  </div>
+                  <p className="meta text-ink-dim">
+                    after proxmox, ceph and the zfs cache take their share — estimates; the preview breaks them down
+                  </p>
+                </div>
+
+                {guests.length === 0 && (
+                  <p className="body-sm pc-field__hint">
+                    no vms or containers yet — add some above, or skip this step.
+                  </p>
+                )}
+
+                {guests.map((guest) => (
+                  <GuestCard
+                    key={guest.id}
+                    guest={guest}
+                    guests={guests}
+                    ctx={guestCtx}
+                    hasAccessKeys={sshKeyLines(access.sshKeys).length > 0}
+                    onReplace={replaceGuest}
+                    onRemove={() => removeGuest(guest.id)}
+                  />
+                ))}
+
+                {softwareHints
+                  .filter((hint): hint is Hint => hint !== null)
+                  .map((hint, i) => (
+                    <div key={i} className={`pc-callout pc-callout--${hint.tone}`}>
+                      <span className="code pc-callout__glyph">{hint.glyph}</span>
+                      <div className="pc-callout__body">
+                        <p className="body-sm pc-callout__text">{hint.text}</p>
+                      </div>
+                    </div>
+                  ))}
+              </div>
+
+              {revealErrors && <ProblemList problems={blocking} step={currentStep} />}
+              <div className="pc-stepflow__nav">
+                <button type="button" className="pc-btn" onClick={() => setCurrentStep("access")}>
+                  <span className="pc-btn__bracket">[</span>
+                  back
+                  <span className="pc-btn__bracket">]</span>
+                </button>
+                {guests.length === 0 ? (
+                  <button type="button" className="pc-btn pc-btn--primary" onClick={() => tryNext("install")}>
+                    <span className="pc-btn__bracket">[</span>
+                    skip
+                    <span className="pc-btn__bracket">]</span>
+                  </button>
+                ) : (
+                  <button type="button" className="pc-btn pc-btn--primary" onClick={() => tryPreview("software")}>
+                    <span className="pc-btn__bracket">[</span>
+                    preview
+                    <span className="pc-btn__bracket">]</span>
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+
+          {currentStep === "install" && (
+            <div className="pc-stepflow__card">
+              <p className="meta pc-stepflow__meta"># step 8 of 8</p>
+              <h2 className="h2 pc-stepflow__title">install</h2>
+              <p className="body pc-stepflow__intro">
+                That&apos;s the whole setup. Everything a node needs to install
+                itself is in its answer file; the rest — ssh hardening, oidc,
+                backups{guests.length > 0 ? ", the vms and containers" : ""} — is
+                applied when the cluster is configured, after the install.
+              </p>
+
+              <div className="pc-stepflow__fields">
+                {blocking.length > 0 && <ProblemList problems={blocking} step={currentStep} />}
+                <AnswerFilesPanel state={snapshot} blocked={blocking.length > 0} />
+              </div>
+
+              <div className="pc-stepflow__nav">
+                <button type="button" className="pc-btn" onClick={() => setCurrentStep("software")}>
+                  <span className="pc-btn__bracket">[</span>
+                  back
+                  <span className="pc-btn__bracket">]</span>
+                </button>
+              </div>
+            </div>
+          )}
           </RevealErrorsContext.Provider>
 
-          <p className="meta mt-3 text-ink-muted">
-            step 5 — install software — isn&apos;t built yet.
-          </p>
         </div>
       </main>
     </div>

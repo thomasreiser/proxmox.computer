@@ -10,12 +10,53 @@
 import {
   addressableBridgeKeys,
   buildAddressConflicts,
+  collectAddressClaims,
   collectNodeNames,
   effectiveClusterStorage,
   maxBondsForCluster,
   siblingVlanTagsFor,
 } from "./derive";
 import { hasLocalDisks, validatePoolName, withEffectiveDiskRoles } from "./storage";
+import { validateCountry, validateKeyboard, validateTimezone } from "./location";
+import {
+  bridgeOptions,
+  busProblems,
+  effectiveGuestNode,
+  haAvailable,
+  imagesFor,
+  takesCloudInit,
+  validateCiUser,
+  validateCores,
+  validateCpuLimit,
+  validateCpuUnits,
+  validateDiskGb,
+  validateGuestName,
+  validateGuestVlan,
+  validateMac,
+  validateMemoryGb,
+  validateMinMemoryGb,
+  validateMountPath,
+  validateMtu,
+  validateNicGateway,
+  validateNicIp,
+  validateOptionalCount,
+  validateOsSystem,
+  validateRate,
+  validateSockets,
+  validateSwapGb,
+  validateTags,
+  validateVmid,
+  validateVolumeGb,
+  effectiveCephVolumes,
+} from "./software";
+import {
+  rootPasswordFor,
+  validateClientId,
+  validateIssuerUrl,
+  validateRealm,
+  validateRootPassword,
+  validateSshKeys,
+} from "./access";
 import {
   RETENTION_FIELDS,
   maxBackupsKept,
@@ -66,10 +107,10 @@ export interface StepProblem {
 /** the parts of the wizard's state the checks read — a PersistedState, or the live form */
 export type CheckedState = Pick<
   PersistedState,
-  "nodeCount" | "nodes" | "hostnameSuffix" | "globalCidr" | "gateway" | "dns" | "homelabVlan" | "clusterStorage" | "storage" | "backups"
+  "location" | "nodeCount" | "nodes" | "hostnameSuffix" | "globalCidr" | "gateway" | "dns" | "homelabVlan" | "clusterStorage" | "storage" | "backups" | "access" | "software"
 >;
 
-const STEP_ORDER: WizardStepId[] = ["hardware", "network", "storage", "backups"];
+const STEP_ORDER: WizardStepId[] = ["location", "hardware", "network", "storage", "backups", "access", "software", "install"];
 
 function nodeLabel(node: NodeInfo, index: number): string {
   return `node ${String(index + 1).padStart(2, "0")} — ${node.name || "unnamed"}`;
@@ -85,6 +126,14 @@ function collector(step: WizardStepId) {
     if (message) problems.push({ step, where, field, message });
   };
   return { problems, check };
+}
+
+export function locationProblems(state: CheckedState): StepProblem[] {
+  const { problems, check } = collector("location");
+  check("cluster", "country", validateCountry(state.location.country));
+  check("cluster", "keyboard", validateKeyboard(state.location.keyboard));
+  check("cluster", "timezone", validateTimezone(state.location.timezone));
+  return problems;
 }
 
 export function hardwareProblems(state: CheckedState): StepProblem[] {
@@ -206,17 +255,105 @@ export function backupProblems(state: CheckedState): StepProblem[] {
   return problems;
 }
 
+export function accessProblems(state: CheckedState): StepProblem[] {
+  const { problems, check } = collector("access");
+  const { access } = state;
+  check("cluster", "ssh public key", validateSshKeys(access.sshKeys));
+  state.nodes.forEach((node, i) => {
+    check(nodeLabel(node, i), "root password", validateRootPassword(rootPasswordFor(access, i)));
+  });
+  if (access.oidc.enabled) {
+    check("cluster", "oidc realm", validateRealm(access.oidc.realm));
+    check("cluster", "issuer url", validateIssuerUrl(access.oidc.issuerUrl));
+    check("cluster", "client id", validateClientId(access.oidc.clientId));
+  }
+  return problems;
+}
+
+/** step 7 is optional — no guests at all is a complete step */
+export function softwareProblems(state: CheckedState): StepProblem[] {
+  const { problems, check } = collector("software");
+  const ctx = { nodes: state.nodes, clusterStorage: state.clusterStorage, storage: state.storage, kubernetes: state.software.kubernetes };
+  const guests = state.software.guests;
+  if (effectiveCephVolumes(guests, ctx)) check("kubernetes", "space for volumes", validateVolumeGb(state.software.kubernetes.volumeGb));
+  const count = (values: string[], v: string) => values.filter((x) => x === v).length;
+  const names = guests.map((g) => g.name);
+  const vmids = guests.map((g) => g.vmid);
+  const staticIps = guests.flatMap((g) => g.nics.filter((n) => n.ipMode === "static").map((n) => n.ip.split("/")[0]));
+  const nodeIps = new Set(collectAddressClaims(state.nodes).map((c) => c.ip));
+
+  guests.forEach((guest, i) => {
+    const where = `guest ${guest.name || guest.vmid || i + 1}`;
+    const vm = guest.kind === "vm";
+    check(where, "name", validateGuestName(guest.name) ?? (count(names, guest.name) > 1 ? "another guest has this name" : null));
+    check(where, "vmid", validateVmid(guest.vmid) ?? (count(vmids, guest.vmid) > 1 ? "another guest has this vmid" : null));
+    check(where, "image", imagesFor(guest.kind).some((img) => img.id === guest.image) ? null : "pick an image");
+    check(where, "tags", validateTags(guest.tags));
+    check(where, "startup order", validateOptionalCount(guest.startupOrder, 1000));
+    check(where, "startup delay", validateOptionalCount(guest.startupDelay, 3600));
+    check(where, "shutdown timeout", validateOptionalCount(guest.shutdownTimeout, 86_400));
+    if (vm) check(where, "sockets", validateSockets(guest.sockets));
+    check(where, "cores", validateCores(guest.cores));
+    check(where, "cpu limit", validateCpuLimit(guest));
+    check(where, "cpu weight", validateCpuUnits(guest.cpuUnits));
+    check(where, "memory", validateMemoryGb(guest.memoryGb));
+    check(where, "minimum memory", validateMinMemoryGb(guest));
+    if (!vm) check(where, "swap", validateSwapGb(guest.swapGb));
+    check(where, "system", validateOsSystem(guest));
+    check(where, "cloud-init user", validateCiUser(guest));
+    check(where, "disks", guest.disks.length === 0 ? "needs a disk" : busProblems(guest));
+
+    const paths = guest.disks.map((d) => d.mountPath);
+    guest.disks.forEach((disk, d) => {
+      const label = vm ? `disk ${d + 1}` : d === 0 ? "root disk" : `mount point ${d}`;
+      check(where, `${label} size`, validateDiskGb(disk.sizeGb));
+      if (!vm) {
+        check(where, `${label} path`, validateMountPath(disk, d) ?? (d > 0 && count(paths, disk.mountPath) > 1 ? "two mount points share this path" : null));
+      }
+    });
+
+    const nodeIndex = effectiveGuestNode(guest, state.nodes.length);
+    const bridges = bridgeOptions(ctx, nodeIndex, guest.ha && haAvailable(guest, ctx));
+    const cloud = takesCloudInit(guest);
+    guest.nics.forEach((nic, n) => {
+      const label = `nic ${n + 1}`;
+      check(where, `${label} bridge`, bridges.includes(nic.bridge) ? null : bridges.length ? "pick a bridge" : "no bridge on this node carries vm traffic — add one in step 3");
+      check(where, `${label} vlan tag`, validateGuestVlan(nic.vlanTag));
+      check(where, `${label} mac address`, validateMac(nic.macAddress));
+      check(where, `${label} rate limit`, validateRate(nic.rateMbps));
+      check(where, `${label} mtu`, validateMtu(nic.mtu));
+      // a vm's address only matters where cloud-init can set it
+      if (vm && !cloud) return;
+      const ip = nic.ip.split("/")[0];
+      check(
+        where,
+        `${label} ip address`,
+        validateNicIp(nic) ??
+          (nic.ipMode === "static" && count(staticIps, ip) > 1 ? "another guest has this address" : null) ??
+          (nic.ipMode === "static" && nodeIps.has(ip) ? "a node already has this address" : null),
+      );
+      check(where, `${label} gateway`, validateNicGateway(nic));
+    });
+  });
+  return problems;
+}
+
 const CHECKS: Record<WizardStepId, (state: CheckedState) => StepProblem[]> = {
+  location: locationProblems,
   hardware: hardwareProblems,
   network: networkProblems,
   storage: storageProblems,
   backups: backupProblems,
+  access: accessProblems,
+  software: softwareProblems,
+  // step 8 asks nothing — it's gated by everything before it
+  install: () => [],
 };
 
 /**
  * Everything blocking a step and every step before it — a later step is
- * built on the earlier ones, so a save restored at step 3 with a gap in
- * step 1 still can't move on.
+ * built on the earlier ones, so a save restored at step 4 with a gap in
+ * step 2 still can't move on.
  */
 export function problemsUpTo(step: WizardStepId, state: CheckedState): StepProblem[] {
   const last = STEP_ORDER.indexOf(step);

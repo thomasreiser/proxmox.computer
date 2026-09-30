@@ -12,7 +12,7 @@ import {
 } from "../../wizard-state";
 
 export interface BackupLinkView {
-  // the bridge step 2 set aside for backups, or the management link
+  // the bridge step 3 set aside for backups, or the management link
   label: string;
   // the nics behind it, e.g. "2 × 10 gbe" — "" if none are known
   speed: string;
@@ -48,7 +48,7 @@ export interface BackupOverview {
   offsite: OffsiteView | null;
 }
 
-/** the bridge a node sends its backups over, if step 2 gave it one */
+/** the bridge a node sends its backups over, if step 3 gave it one */
 export function backupLinkFor(node: NodeInfo): BackupLinkView {
   const speedOf = (interfaceId: string) =>
     linkSpeedLabel(nicSpeedsForInterface(interfaceId, node.nics, node.network.bonds));

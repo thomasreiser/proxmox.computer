@@ -14,7 +14,7 @@ const facts = (plan: Parameters<typeof backupPlan>[0]) =>
   Object.fromEntries(buildBackupOverview(cluster(3), backupPlan(plan), "").target!.facts.map((f) => [f.key, f.value]));
 
 describe("backupLinkFor", () => {
-  it("names the bridge step 2 set aside for backups", () => {
+  it("names the bridge step 3 set aside for backups", () => {
     expect(backupLinkFor(node({ nics: nics("1gbe", "10gbe"), network: backupNic }))).toEqual({
       label: "vmbr1",
       speed: "10 gbe",

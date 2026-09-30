@@ -15,7 +15,9 @@ import {
 import "@xyflow/react/dist/style.css";
 import { problemsUpTo } from "../../step-checks";
 import { ProblemList } from "../../problem-list";
-import { loadPersistedState, persistCurrentStep, type NodeInfo, type PersistedState } from "../../wizard-state";
+import { type NodeInfo, type PersistedState } from "../../wizard-state";
+import { loadPersistedState, persistCurrentStep } from "../../saved-state";
+import { VaultGate } from "../../vault-gate";
 import { NodeCard, type NodeCardNode } from "./node-card";
 import { gridColumns, gridRowYs } from "./grid";
 
@@ -106,6 +108,14 @@ function formatTb(gb: number): string {
 }
 
 export default function HardwarePreview() {
+  return (
+    <VaultGate mode="preview">
+      <HardwarePreviewPage />
+    </VaultGate>
+  );
+}
+
+function HardwarePreviewPage() {
   const router = useRouter();
   // localStorage doesn't exist during ssr, so the saved config can only be
   // read post-mount — the canvas stays empty until then.
@@ -116,12 +126,14 @@ export default function HardwarePreview() {
   // server html, so it has to happen post-mount — the same trade the
   // wizard itself makes, and what the set-state-in-effect rule's general
   // advice doesn't cover.
-  /* eslint-disable react-hooks/set-state-in-effect */
+   
   useEffect(() => {
-    setSaved(loadPersistedState());
-    setHydrated(true);
+    void loadPersistedState().then((state) => {
+      setSaved(state);
+      setHydrated(true);
+    });
   }, []);
-  /* eslint-enable react-hooks/set-state-in-effect */
+   
 
   const flowNodes = useMemo(() => (saved ? layoutNodes(saved.nodes) : []), [saved]);
   const totals = useMemo(() => {
@@ -140,8 +152,8 @@ export default function HardwarePreview() {
 
   function goToNetwork() {
     if (blocking.length > 0) return;
-    persistCurrentStep("network");
-    router.push("/setup");
+    // the hand-off is saved (encrypted) before the wizard reads it back
+    void persistCurrentStep("network").then(() => router.push("/setup"));
   }
 
   return (
@@ -163,76 +175,79 @@ export default function HardwarePreview() {
       </header>
 
       <main className="flex-1 px-6 py-12">
-        <div className="mx-auto flex max-w-6xl flex-col" style={{ gap: "var(--space-5)" }}>
-          <div>
-            <p className="meta pc-stepflow__meta"># step 1 of 5 — preview</p>
-            <h2 className="h2 pc-stepflow__title">hardware</h2>
-            <p className="body pc-stepflow__intro">
-              Every node you described, drawn to scale. Check the disks and nics
-              look right before moving on — step 2 wires these same nics into
-              bridges and bonds.
-            </p>
-          </div>
-
-          {hydrated && saved && totals.count > 0 && (
-            <div className="pc-summary">
-              <div className="pc-summary__cell">
-                <span className="label pc-summary__key">nodes</span>
-                <span className="code pc-summary__val">{totals.count}</span>
-              </div>
-              <div className="pc-summary__cell">
-                <span className="label pc-summary__key">total cores</span>
-                <span className="code pc-summary__val">{totals.cores || "—"}</span>
-              </div>
-              <div className="pc-summary__cell">
-                <span className="label pc-summary__key">total memory</span>
-                <span className="code pc-summary__val">{totals.ramGb ? `${totals.ramGb} gb` : "—"}</span>
-              </div>
-              <div className="pc-summary__cell">
-                <span className="label pc-summary__key">raw storage</span>
-                <span className="code pc-summary__val">{formatTb(totals.storageGb)}</span>
-              </div>
+        {/* nothing until the saved setup is decrypted — no flash of an empty preview */}
+        {hydrated && (
+          <div className="mx-auto flex max-w-6xl flex-col" style={{ gap: "var(--space-5)" }}>
+            <div>
+              <p className="meta pc-stepflow__meta"># step 2 of 8 — preview</p>
+              <h2 className="h2 pc-stepflow__title">hardware</h2>
+              <p className="body pc-stepflow__intro">
+                Every node you described, drawn to scale. Check the disks and nics
+                look right before moving on — step 3 wires these same nics into
+                bridges and bonds.
+              </p>
             </div>
-          )}
 
-          <div className="pc-canvas">
-            {hydrated && !saved && (
-              <div className="pc-canvas__empty">
-                <p className="body text-ink-muted">nothing saved to preview yet.</p>
-                <Link href="/setup" className="pc-btn pc-btn--primary">
-                  <span className="pc-btn__bracket">[</span>
-                  start at step 1
-                  <span className="pc-btn__bracket">]</span>
-                </Link>
+            {hydrated && saved && totals.count > 0 && (
+              <div className="pc-summary">
+                <div className="pc-summary__cell">
+                  <span className="label pc-summary__key">nodes</span>
+                  <span className="code pc-summary__val">{totals.count}</span>
+                </div>
+                <div className="pc-summary__cell">
+                  <span className="label pc-summary__key">total cores</span>
+                  <span className="code pc-summary__val">{totals.cores || "—"}</span>
+                </div>
+                <div className="pc-summary__cell">
+                  <span className="label pc-summary__key">total memory</span>
+                  <span className="code pc-summary__val">{totals.ramGb ? `${totals.ramGb} gb` : "—"}</span>
+                </div>
+                <div className="pc-summary__cell">
+                  <span className="label pc-summary__key">raw storage</span>
+                  <span className="code pc-summary__val">{formatTb(totals.storageGb)}</span>
+                </div>
               </div>
             )}
-            {saved && (
-              // no minimap: the canvas is always fitted to every card, so
-              // it only ever showed a gray box
-              <ReactFlowProvider>
-                <HardwareCanvas nodes={flowNodes} />
-              </ReactFlowProvider>
-            )}
-          </div>
 
-          {hydrated && saved && <ProblemList problems={blocking} step="hardware" />}
-          <div className="pc-stepflow__nav">
-            <Link href="/setup" className="pc-btn pc-btn--ghost">
-              ← back to hardware
-            </Link>
-            <button
-              type="button"
-              className="pc-btn pc-btn--primary"
-              onClick={goToNetwork}
-              disabled={blocking.length > 0}
-              title={blocking.length > 0 ? "fix the problems listed above first" : undefined}
-            >
-              <span className="pc-btn__bracket">[</span>
-              next
-              <span className="pc-btn__bracket">]</span>
-            </button>
+            <div className="pc-canvas">
+              {hydrated && !saved && (
+                <div className="pc-canvas__empty">
+                  <p className="body text-ink-muted">nothing saved to preview yet.</p>
+                  <Link href="/setup" className="pc-btn pc-btn--primary">
+                    <span className="pc-btn__bracket">[</span>
+                    start at step 1
+                    <span className="pc-btn__bracket">]</span>
+                  </Link>
+                </div>
+              )}
+              {saved && (
+                // no minimap: the canvas is always fitted to every card, so
+                // it only ever showed a gray box
+                <ReactFlowProvider>
+                  <HardwareCanvas nodes={flowNodes} />
+                </ReactFlowProvider>
+              )}
+            </div>
+
+            {hydrated && saved && <ProblemList problems={blocking} step="hardware" />}
+            <div className="pc-stepflow__nav">
+              <Link href="/setup" className="pc-btn pc-btn--ghost">
+                ← back to hardware
+              </Link>
+              <button
+                type="button"
+                className="pc-btn pc-btn--primary"
+                onClick={goToNetwork}
+                disabled={blocking.length > 0}
+                title={blocking.length > 0 ? "fix the problems listed above first" : undefined}
+              >
+                <span className="pc-btn__bracket">[</span>
+                next
+                <span className="pc-btn__bracket">]</span>
+              </button>
+            </div>
           </div>
-        </div>
+        )}
       </main>
     </div>
   );
