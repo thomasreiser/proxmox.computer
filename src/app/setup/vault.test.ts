@@ -1,9 +1,10 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   STORAGE_KEY,
   WrongPassphraseError,
   adopt,
   clearStored,
+  cryptoAvailable,
   isUnlocked,
   lock,
   open,
@@ -133,5 +134,24 @@ describe("the stored copy", () => {
   it("reads a legacy plain save as nothing stored", () => {
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ version: 14, nodes: [] }));
     expect(storedEnvelope()).toBeNull();
+  });
+});
+
+// browsers drop crypto.subtle outside a secure origin (plain http)
+describe("cryptoAvailable", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("is true where WebCrypto is offered", () => {
+    expect(cryptoAvailable()).toBe(true);
+  });
+
+  it("is false without crypto.subtle, as over plain http", () => {
+    vi.stubGlobal("crypto", { getRandomValues: (a: Uint8Array) => a });
+    expect(cryptoAvailable()).toBe(false);
+  });
+
+  it("is false with no crypto at all", () => {
+    vi.stubGlobal("crypto", undefined);
+    expect(cryptoAvailable()).toBe(false);
   });
 });

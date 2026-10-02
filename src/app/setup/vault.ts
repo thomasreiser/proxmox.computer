@@ -87,6 +87,15 @@ async function deriveKey(passphrase: string, salt: Uint8Array<ArrayBuffer>, roun
   );
 }
 
+/**
+ * Whether this page can derive keys at all. Browsers only offer WebCrypto
+ * on a secure origin (https, or localhost), so a copy opened over plain
+ * http by address has no `crypto.subtle`, and nothing could be sealed.
+ */
+export function cryptoAvailable(): boolean {
+  return typeof globalThis.crypto?.subtle?.deriveKey === "function";
+}
+
 /** a new vault: fresh salt, key derived from the passphrase, held in memory */
 export async function startSession(passphrase: string): Promise<void> {
   const salt = crypto.getRandomValues(new Uint8Array(16));

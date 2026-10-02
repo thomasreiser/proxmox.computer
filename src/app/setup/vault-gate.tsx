@@ -5,6 +5,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import {
   WrongPassphraseError,
   clearStored,
+  cryptoAvailable,
   isUnlocked,
   startSession,
   storedEnvelope,
@@ -12,7 +13,7 @@ import {
   validateNewPassphrase,
 } from "./vault";
 
-type Phase = "checking" | "open" | "unlock" | "create";
+type Phase = "checking" | "open" | "unlock" | "create" | "insecure";
 
 /**
  * Stands in front of anything that reads the saved setup. The wizard needs
@@ -27,6 +28,7 @@ export function VaultGate({ mode, children }: { mode: "wizard" | "preview"; chil
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     if (isUnlocked()) setPhase("open");
+    else if (!cryptoAvailable()) setPhase("insecure");
     else if (storedEnvelope()) setPhase("unlock");
     else setPhase(mode === "wizard" ? "create" : "open");
   }, [mode]);
@@ -48,13 +50,36 @@ export function VaultGate({ mode, children }: { mode: "wizard" | "preview"; chil
       </header>
       <main className="flex-1 px-6 py-12">
         <div className="mx-auto max-w-xl">
-          {phase === "create" ? (
+          {phase === "insecure" ? (
+            <InsecureNotice />
+          ) : phase === "create" ? (
             <CreateForm onDone={() => setPhase("open")} />
           ) : (
             <UnlockForm onDone={() => setPhase("open")} onStartOver={() => setPhase(mode === "wizard" ? "create" : "open")} />
           )}
         </div>
       </main>
+    </div>
+  );
+}
+
+/** without WebCrypto nothing can be sealed, so nothing may be typed in either */
+function InsecureNotice() {
+  return (
+    <div className="pc-stepflow__card">
+      <p className="meta pc-stepflow__meta"># not a secure page</p>
+      <h2 className="h2 pc-stepflow__title">this page needs https</h2>
+      <p className="body pc-stepflow__intro">
+        Your setup is encrypted in this browser before it&apos;s saved, and
+        browsers only allow that encryption on a secure page: https, or
+        localhost. This copy was opened over plain http, so it can&apos;t
+        keep root passwords safe — open it over https instead.
+      </p>
+      <div className="pc-stepflow__nav">
+        <Link href="/" className="pc-btn pc-btn--ghost">
+          ← back
+        </Link>
+      </div>
     </div>
   );
 }

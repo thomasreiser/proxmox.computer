@@ -4,7 +4,7 @@
  * the wiring between the pure modules (./validation, ./derive, ./hints)
  * and the component tree that renders them, which unit tests can't reach.
  */
-import { describe, expect, it, beforeEach } from "vitest";
+import { describe, expect, it, beforeEach, vi } from "vitest";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import Setup from "./page";
@@ -1153,6 +1153,24 @@ describe("the passphrase", () => {
     await user.click(screen.getByRole("button", { name: /delete it and start over/i }));
     expect(window.localStorage.getItem(STORAGE_KEY)).toBeNull();
     expect(await screen.findByRole("heading", { name: "choose a passphrase" })).toBeInTheDocument();
+  });
+
+  // over plain http the browser has no crypto.subtle: nothing could be sealed
+  it("says the page needs https instead of asking for a passphrase it can't use", async () => {
+    await savePersistedState(persistedState({ currentStep: "network" }));
+    lock();
+    vi.stubGlobal("crypto", { getRandomValues: (a: Uint8Array) => a });
+    try {
+      render(<Setup />);
+      expect(await screen.findByRole("heading", { name: "this page needs https" })).toBeInTheDocument();
+      expect(screen.queryByLabelText(/^passphrase/i)).not.toBeInTheDocument();
+      expect(screen.queryByRole("heading", { name: "unlock your setup" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("heading", { name: "network" })).not.toBeInTheDocument();
+      // the saved setup is left alone for a secure visit
+      expect(window.localStorage.getItem(STORAGE_KEY)).not.toBeNull();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
 
