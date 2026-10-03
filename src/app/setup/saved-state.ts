@@ -8,6 +8,7 @@
 
 import { defaultAccessPlan } from "./access";
 import { defaultBackupPlan } from "./backups";
+import { defaultInstallPlan } from "./boot-disk";
 import { defaultNode, defaultNodeNetwork, defaultStoragePlan, deriveGateway } from "./derive";
 import { defaultLocation } from "./location";
 import { defaultSoftwarePlan } from "./software";
@@ -48,10 +49,11 @@ export function freshState(): PersistedState {
     backups: defaultBackupPlan(),
     access: defaultAccessPlan(),
     software: defaultSoftwarePlan(),
+    install: defaultInstallPlan(),
   };
 }
 
-const ORDER: WizardStepId[] = [...SAVED_STEPS, "install"];
+const ORDER: WizardStepId[] = SAVED_STEPS;
 const before = (a: WizardStepId, b: WizardStepId) => ORDER.indexOf(a) < ORDER.indexOf(b);
 
 /**
@@ -93,6 +95,7 @@ export function startOverFrom(saved: PersistedState, from: SavedStepId): Persist
     backups: keep("backups") ? saved.backups : fresh.backups,
     access: keep("access") ? saved.access : fresh.access,
     software: keep("software") ? saved.software : fresh.software,
+    install: keep("install") ? saved.install : fresh.install,
   };
 }
 

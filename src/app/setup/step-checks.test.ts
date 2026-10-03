@@ -1,8 +1,18 @@
 import { describe, expect, it } from "vitest";
-import { accessProblems, backupProblems, hardwareProblems, locationProblems, softwareProblems, networkProblems, problemsUpTo, storageProblems } from "./step-checks";
+import {
+  accessProblems,
+  backupProblems,
+  hardwareProblems,
+  installProblems,
+  locationProblems,
+  softwareProblems,
+  networkProblems,
+  problemsUpTo,
+  storageProblems,
+} from "./step-checks";
 import { required } from "./validation";
 import { newGuest } from "./software";
-import { accessPlan, backupPlan, bond, bridge, cluster, disks, network, nics, persistedState, guestWith, softwarePlan } from "./test-fixtures";
+import { accessPlan, backupPlan, bond, bridge, cluster, disks, installPlan, network, nics, persistedState, guestWith, softwarePlan } from "./test-fixtures";
 
 // a node whose every required field is filled
 const complete = () => persistedState({ nodes: cluster(3, { ramGb: "64", bootDiskSizeGb: "512" }) });
@@ -388,6 +398,37 @@ describe("softwareProblems", () => {
       "guest ct-01: mount point 2 path",
       "guest ct-01: mount point 3 path",
     ]);
+  });
+});
+
+describe("installProblems", () => {
+  const fields = (overrides: Parameters<typeof persistedState>[0]) =>
+    installProblems({ ...complete(), ...overrides }).map((p) => `${p.where}: ${p.field}`);
+
+  // an unnamed disk keeps the placeholder, which stops the install safely
+  it("finds nothing wrong with no boot disk named yet", () => {
+    expect(fields({})).toEqual([]);
+    expect(fields({ identicalHardware: true })).toEqual([]);
+  });
+
+  it("finds nothing wrong with valid names", () => {
+    expect(fields({ install: installPlan({ bootDisks: ["nvme0n1", "sda", ""] }) })).toEqual([]);
+  });
+
+  it("flags each node whose name lsblk wouldn't print", () => {
+    expect(fields({ install: installPlan({ bootDisks: ["/dev/sda", "nvme0n1", "sdb1"] }) })).toEqual([
+      "node 01 — pve01: boot disk",
+      "node 03 — pve03: boot disk",
+    ]);
+  });
+
+  it("checks only the shared name while the hardware is identical", () => {
+    expect(fields({ identicalHardware: true, install: installPlan({ bootDisk: "sda1", bootDisks: ["nvme0n1"] }) })).toEqual(["cluster: boot disk"]);
+    expect(fields({ identicalHardware: true, install: installPlan({ bootDisk: "sda", bootDisks: ["/dev/x"] }) })).toEqual([]);
+  });
+
+  it("is step 8's", () => {
+    expect(installProblems({ ...complete(), install: installPlan({ bootDisks: ["x"] }) })[0].step).toBe("install");
   });
 });
 

@@ -23,6 +23,13 @@ describe("how-it-works page", () => {
     for (const n of referenced) expect(defined).toContain(n);
   });
 
+  // the rule says the wizard names no device — the boot disk is the one it
+  // does, and the page says so rather than claiming otherwise
+  it("owns up to the boot disk as the one device the wizard names", () => {
+    render(<HowItWorks />);
+    expect(screen.getByText(/^One exception, because the installer needs it before anything else runs: the boot disk\./)).toBeInTheDocument();
+  });
+
   it("colors each step by the side it runs on", () => {
     render(<HowItWorks />);
     for (const phase of PHASES) {

@@ -187,6 +187,15 @@ export default function HowItWorks() {
               an identity at all. Asking you to transcribe either into a web
               form would mean a typo can wipe the wrong disk.
             </p>
+            <p className="body mt-4 max-w-2xl text-ink-muted">
+              One exception, because the installer needs it before anything
+              else runs: the boot disk. The wizard&apos;s last step asks for
+              it only after you&apos;ve booted that machine and read the name
+              off <span className="code">lsblk</span>, takes nothing but a
+              whole disk, warns when the name doesn&apos;t fit the disk type
+              you declared, and leaves a node you skip unable to install
+              rather than guessing.
+            </p>
           </div>
         </section>
 

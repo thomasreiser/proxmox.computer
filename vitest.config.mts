@@ -17,6 +17,14 @@ export default defineConfig({
     environment: "jsdom",
     setupFiles: ["./src/test/setup.ts"],
     globals: true,
-    include: ["src/**/*.test.{ts,tsx}"],
+    // the integration tests reach step 4 the way a visitor does, through
+    // steps 1–3 and two hand-offs, and each wait in them may take up to
+    // SAVE_TIMEOUT (5s, wizard-test-helpers.tsx). vitest's default of 5s for
+    // the whole test is less than one of those waits, so under a full
+    // parallel run they timed out while the app was working. 20s fits the
+    // helpers' budget and still fails a render loop or a hang.
+    testTimeout: 20_000,
+    // tofu/functions holds the CloudFront Function the site is served through
+    include: ["src/**/*.test.{ts,tsx}", "tofu/**/*.test.ts"],
   },
 });

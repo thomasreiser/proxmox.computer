@@ -57,6 +57,7 @@ import {
   validateRootPassword,
   validateSshKeys,
 } from "./access";
+import { bootDiskFor, validateBootDiskName } from "./boot-disk";
 import {
   RETENTION_FIELDS,
   maxBackupsKept,
@@ -107,7 +108,21 @@ export interface StepProblem {
 /** the parts of the wizard's state the checks read — a PersistedState, or the live form */
 export type CheckedState = Pick<
   PersistedState,
-  "location" | "nodeCount" | "nodes" | "hostnameSuffix" | "globalCidr" | "gateway" | "dns" | "homelabVlan" | "clusterStorage" | "storage" | "backups" | "access" | "software"
+  | "location"
+  | "nodeCount"
+  | "nodes"
+  | "identicalHardware"
+  | "hostnameSuffix"
+  | "globalCidr"
+  | "gateway"
+  | "dns"
+  | "homelabVlan"
+  | "clusterStorage"
+  | "storage"
+  | "backups"
+  | "access"
+  | "software"
+  | "install"
 >;
 
 const STEP_ORDER: WizardStepId[] = ["location", "hardware", "network", "storage", "backups", "access", "software", "install"];
@@ -338,6 +353,20 @@ export function softwareProblems(state: CheckedState): StepProblem[] {
   return problems;
 }
 
+/**
+ * Step 8 only checks what's typed: a node with no boot disk yet still gets
+ * its file, with the placeholder the installer stops at.
+ */
+export function installProblems(state: CheckedState): StepProblem[] {
+  const { problems, check } = collector("install");
+  if (state.identicalHardware) {
+    check("cluster", "boot disk", validateBootDiskName(state.install.bootDisk));
+  } else {
+    state.nodes.forEach((node, i) => check(nodeLabel(node, i), "boot disk", validateBootDiskName(bootDiskFor(state, i))));
+  }
+  return problems;
+}
+
 const CHECKS: Record<WizardStepId, (state: CheckedState) => StepProblem[]> = {
   location: locationProblems,
   hardware: hardwareProblems,
@@ -346,8 +375,7 @@ const CHECKS: Record<WizardStepId, (state: CheckedState) => StepProblem[]> = {
   backups: backupProblems,
   access: accessProblems,
   software: softwareProblems,
-  // step 8 asks nothing — it's gated by everything before it
-  install: () => [],
+  install: installProblems,
 };
 
 /**

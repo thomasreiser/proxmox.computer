@@ -449,9 +449,9 @@ import type { LocationPlan } from "./location";
 import type { SoftwarePlan } from "./software";
 export { STORAGE_KEY } from "./vault";
 
-// the steps whose answers are saved — step 8, install, asks nothing
-export type SavedStepId = Exclude<WizardStepId, "install">;
-export const SAVED_STEPS: SavedStepId[] = ["location", "hardware", "network", "storage", "backups", "access", "software"];
+// the steps whose answers are saved — every one, step 8's boot disks included
+export type SavedStepId = WizardStepId;
+export const SAVED_STEPS: SavedStepId[] = ["location", "hardware", "network", "storage", "backups", "access", "software", "install"];
 
 // One version per step. Bump a step's whenever the shape of what it saves
 // changes (see STEP_SECTIONS for which fields those are). A save is kept up
@@ -466,6 +466,7 @@ export const STEP_VERSIONS: Record<SavedStepId, number> = {
   backups: 1,
   access: 1,
   software: 1,
+  install: 1,
 };
 
 // The layout of the save itself: which fields belong to which step, and
@@ -501,6 +502,16 @@ export interface AccessPlan {
   oidc: OidcPlan;
 }
 
+// Step 8: each node's boot disk, by the name lsblk gives it — the one
+// device the wizard names, and only once the visitor has looked at the
+// machine (see boot-disk.ts). Read through bootDiskFor().
+export interface InstallPlan {
+  // every node's, while the hardware is identical
+  bootDisk: string;
+  // per node, by index, otherwise — read past the end as ""
+  bootDisks: string[];
+}
+
 export interface PersistedState {
   version: number;
   // the STEP_VERSIONS each step was saved under
@@ -528,6 +539,7 @@ export interface PersistedState {
   backups: BackupPlan;
   access: AccessPlan;
   software: SoftwarePlan;
+  install: InstallPlan;
 }
 
 function isSoftwarePlan(value: unknown): value is SoftwarePlan {
@@ -585,7 +597,7 @@ function isAccessPlan(value: unknown): value is AccessPlan {
 //   network  — hostnameSuffix, globalCidr, gateway, dns, homelabVlan,
 //              identicalNetwork, every node's network
 //   storage  — clusterStorage, storage, identicalStorage, every disk's role
-//   backups, access, software — their own plan
+//   backups, access, software, install — their own plan
 //
 // Each check is deliberately not exhaustive — every individual field getting
 // checked would make it as brittle as the state it's guarding. The step
@@ -646,9 +658,15 @@ export const STEP_SECTIONS: Record<SavedStepId, (v: Loose) => boolean> = {
   access: (v) => isAccessPlan(v.access),
 
   software: (v) => isSoftwarePlan(v.software),
+
+  install: (v) =>
+    isObject(v.install) &&
+    typeof v.install.bootDisk === "string" &&
+    Array.isArray(v.install.bootDisks) &&
+    v.install.bootDisks.every((d) => typeof d === "string"),
 };
 
-const ALL_STEPS: WizardStepId[] = [...SAVED_STEPS, "install"];
+const ALL_STEPS: WizardStepId[] = SAVED_STEPS;
 
 /** a save in this build's layout: the layout version, and a step to reopen on — its steps unchecked */
 export function isSaveLayout(value: unknown): value is Loose {

@@ -10,7 +10,7 @@ import userEvent from "@testing-library/user-event";
 import Setup from "./page";
 import { STEP_VERSIONS, STORAGE_KEY, type PersistedState } from "./wizard-state";
 import { loadPersistedState, savePersistedState } from "./saved-state";
-import { ED25519_KEY, RSA_KEY, accessPlan, backupPlan, cluster, persistedState } from "./test-fixtures";
+import { ED25519_KEY, RSA_KEY, accessPlan, backupPlan, cluster, disks, installPlan, persistedState } from "./test-fixtures";
 import { defaultAccessPlan } from "./access";
 import { countryFor, keyboardFor, timezoneOptions } from "./location";
 import { lock, unlockStored } from "./vault";
@@ -1524,8 +1524,138 @@ describe("step 8 — install", () => {
   it("holds the files back, listing what an earlier step still needs", async () => {
     await renderStep8({ access: accessPlan({ rootPasswords: ["long-enough-pw-1", "", "long-enough-pw-3"] }) });
     expect(screen.getByRole("alert")).toHaveTextContent(/step access/i);
-    expect(screen.getByText(/fix the problems listed below first/i)).toBeInTheDocument();
+    expect(screen.getByText(/fix the problems listed at the top of this step first/i)).toBeInTheDocument();
+    // the guide itself stays readable while the files are held back
+    expect(screen.getByRole("list", { name: "install, step by step" })).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: /answer-.*\.toml/ })).not.toBeInTheDocument();
+  });
+
+  it("walks through the install in order: iso, find the boot disk, name it, files, build, boot", async () => {
+    await renderStep8();
+    const guide = screen.getByRole("list", { name: "install, step by step" });
+    // the guide's own steps — each holds lists of its own
+    const titles = Array.from(guide.children).map((li) => li.querySelector(".h3")?.textContent);
+    expect(titles).toEqual([
+      "01 get proxmox ve 9.2",
+      "02 find each node's boot disk",
+      "03 name the boot disk",
+      "04 download the answer files",
+      "05 build one iso per node",
+      "06 write it to a usb stick and boot",
+    ]);
+    expect(within(guide).getByRole("link", { name: "proxmox-ve_9.2-1.iso" })).toHaveAttribute(
+      "href",
+      "https://enterprise.proxmox.com/iso/proxmox-ve_9.2-1.iso",
+    );
+    expect(screen.getByText(/^echo "[0-9a-f]{64}\s+proxmox-ve_9\.2-1\.iso" \| sha256sum -c$/)).toBeInTheDocument();
+  });
+
+  it("says what each node's boot disk looks like in lsblk", async () => {
+    await renderStep8();
+    expect(screen.getByText("lsblk -d -o NAME,SIZE,TRAN,ROTA,MODEL,SERIAL")).toBeInTheDocument();
+    const rows = within(screen.getByRole("list", { name: "boot disks to look for" })).getAllByRole("listitem");
+    expect(rows).toHaveLength(3);
+    expect(rows[1]).toHaveTextContent(/^pve02\.lab\.lan — nvme, 512 gbSIZE ≈ 477G; NAME starts with nvme/);
+    expect(rows[1]).not.toHaveTextContent(/looks? the same/);
+  });
+
+  it("warns when another disk looks just like the boot disk", async () => {
+    await renderStep8({
+      nodes: cluster(3, { ramGb: "64", bootDiskType: "ssd", bootDiskSizeGb: "512", additionalDisks: disks({ type: "ssd", sizeGb: "512" }) }),
+    });
+    const rows = within(screen.getByRole("list", { name: "boot disks to look for" })).getAllByRole("listitem");
+    expect(rows).toHaveLength(3);
+    for (const row of rows) expect(row).toHaveTextContent(/another disk looks the same — tell them apart by MODEL or SERIAL/);
+  });
+
+  // the toml as its download link carries it — the links are rebuilt after
+  // every edit (hashing each password, sealing the setup), hence the wait
+  function downloadedToml(fileName: string) {
+    const link = screen.getByRole("link", { name: new RegExp(`^\\[\\s*${fileName.replace(".", "\\.")}\\s*\\]$`) });
+    const href = link.getAttribute("href") ?? "";
+    return decodeURIComponent(href.slice(href.indexOf(",") + 1));
+  }
+  const FILES_REBUILT = { timeout: 5000 };
+
+  it("asks each node's boot disk, and writes it into that node's file", async () => {
+    await renderStep8();
+    const user = userEvent.setup();
+    expect(screen.queryByLabelText(/^boot disk — every node/)).not.toBeInTheDocument();
+    await user.type(screen.getByLabelText(/^boot disk — pve01\.lab\.lan/), "nvme0n1");
+    await user.type(screen.getByLabelText(/^boot disk — pve02\.lab\.lan/), "nvme1n1");
+
+    await waitFor(() => expect(downloadedToml("answer-pve02.toml")).toContain('disk-list = ["nvme1n1"]'), FILES_REBUILT);
+    expect(downloadedToml("answer-pve01.toml")).toContain('disk-list = ["nvme0n1"]');
+    // pve03 isn't named: its file stops the install, and the guide says so
+    expect(downloadedToml("answer-pve03.toml")).toContain('disk-list = ["CHANGE-ME"]');
+    expect(screen.getByText(/no boot disk named yet for pve03\.lab\.lan: its file keeps/)).toBeInTheDocument();
+
+    await waitForSave((s) => s.install.bootDisks[1] === "nvme1n1");
+    expect((await saved())?.install.bootDisks).toEqual(["nvme0n1", "nvme1n1", ""]);
+  });
+
+  it("asks once while the hardware is identical, for every node's file", async () => {
+    await renderStep8({ identicalHardware: true });
+    const user = userEvent.setup();
+    expect(screen.queryByLabelText(/^boot disk — pve01/)).not.toBeInTheDocument();
+    await user.type(screen.getByLabelText(/^boot disk — every node/), "sda");
+    await waitFor(() => expect(downloadedToml("answer-pve03.toml")).toContain('disk-list = ["sda"]'), FILES_REBUILT);
+    expect(downloadedToml("answer-pve01.toml")).toContain('disk-list = ["sda"]');
+    expect(screen.getByText(/each file already names its node's boot disk/i)).toBeInTheDocument();
+    await waitForSave((s) => s.install.bootDisk === "sda");
+  });
+
+  it("restores the boot disks it saved", async () => {
+    await renderStep8({ install: installPlan({ bootDisks: ["nvme0n1", "nvme1n1", "nvme2n1"] }) });
+    expect(screen.getByLabelText(/^boot disk — pve03\.lab\.lan/)).toHaveValue("nvme2n1");
+  });
+
+  it("refuses a name lsblk wouldn't print, and holds the files back", async () => {
+    await renderStep8();
+    const user = userEvent.setup();
+    const field = screen.getByLabelText(/^boot disk — pve01\.lab\.lan/);
+    await user.type(field, "/dev/sda");
+    await user.tab();
+    // under the field, and in the list of what blocks the downloads
+    expect(field.closest(".pc-field")).toHaveTextContent(/just the name lsblk prints, without \/dev\//);
+    expect(screen.getByRole("alert")).toHaveTextContent(/boot disk.*just the name lsblk prints/i);
+    expect(screen.queryByRole("link", { name: /answer-.*\.toml/ })).not.toBeInTheDocument();
+
+    await user.clear(field);
+    await user.type(field, "sda");
+    expect(await screen.findAllByRole("link", { name: /^\[\s*answer-.*\.toml\s*\]$/ }, { timeout: 5000 })).toHaveLength(3);
+  });
+
+  it("warns when the name doesn't fit the disk type from step 2", async () => {
+    await renderStep8();
+    const user = userEvent.setup();
+    await user.type(screen.getByLabelText(/^boot disk — pve01\.lab\.lan/), "sda");
+    expect(screen.getByText(/step 2 says this boot disk is nvme, but sda is a sata\/sas name/)).toBeInTheDocument();
+    await user.clear(screen.getByLabelText(/^boot disk — pve01\.lab\.lan/));
+    await user.type(screen.getByLabelText(/^boot disk — pve01\.lab\.lan/), "nvme0n1");
+    expect(screen.queryByText(/step 2 says this boot disk is/)).not.toBeInTheDocument();
+  });
+
+  it("gives each node its own validate and prepare-iso commands", async () => {
+    await renderStep8();
+    expect(screen.getByText("proxmox-auto-install-assistant validate-answer answer-pve02.toml")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "proxmox-auto-install-assistant prepare-iso proxmox-ve_9.2-1.iso --fetch-from iso --answer-file answer-pve02.toml --output proxmox-ve-pve02.iso",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getAllByText(/^proxmox-auto-install-assistant prepare-iso /)).toHaveLength(3);
+  });
+
+  it("says where each node answers once installed, and to pull the stick", async () => {
+    await renderStep8();
+    const urls = within(screen.getByRole("table", { name: "web ui of each node" })).getAllByRole("row");
+    expect(urls.map((r) => r.textContent)).toEqual([
+      "pve01.lab.lanhttps://10.0.0.11:8006",
+      "pve02.lab.lanhttps://10.0.0.12:8006",
+      "pve03.lab.lanhttps://10.0.0.13:8006",
+    ]);
+    expect(screen.getByText(/take the stick out once the install finishes/i)).toBeInTheDocument();
   });
 
   it("goes back to software", async () => {

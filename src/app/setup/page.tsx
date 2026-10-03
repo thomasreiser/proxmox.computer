@@ -35,6 +35,7 @@ import {
   type InterfacePurpose,
   type NicInfo,
   type NicSpeed,
+  type InstallPlan,
   type NodeInfo,
   type NodeNetwork,
   type PersistedState,
@@ -117,7 +118,7 @@ import {
 } from "./access";
 import { VaultGate } from "./vault-gate";
 import { CheckedTextField, CidrField, RevealErrorsContext } from "./form-fields";
-import { AnswerFilesPanel } from "./answer-files-panel";
+import { InstallGuide } from "./install-guide";
 import { MeterBar } from "./meter-bar";
 import { bootDiskMeter, cephMeter, localMeter, memoryMeter, zfsMeter } from "./capacity";
 import {
@@ -2467,6 +2468,7 @@ function Wizard() {
   const [backups, setBackups] = useState<BackupPlan>(initial.backups);
   const [access, setAccess] = useState<AccessPlan>(initial.access);
   const [software, setSoftware] = useState<SoftwarePlan>(initial.software);
+  const [install, setInstall] = useState<InstallPlan>(initial.install);
   // set when a save came back only in part: this build changed a step
   const [startedOver, setStartedOver] = useState<string | null>(null);
   // the kubernetes planner's layout while it's open — not saved: it only makes guests
@@ -2515,6 +2517,7 @@ function Wizard() {
           : saved.location,
       );
       setSoftware(saved.software);
+      setInstall(saved.install);
       } else {
         // a new setup starts from the browser it's being made in
         setLocation(detectLocation(navigator.language, Intl.DateTimeFormat().resolvedOptions().timeZone));
@@ -2551,6 +2554,8 @@ function Wizard() {
       // a removed node's password isn't kept around
       access: { ...access, rootPasswords: nodes.map((_, i) => rootPasswordFor(access, i)) },
       software,
+      // nor its boot disk
+      install: { ...install, bootDisks: nodes.map((_, i) => install.bootDisks[i] ?? "") },
     }),
     [
       currentStep,
@@ -2570,6 +2575,7 @@ function Wizard() {
       backups,
       access,
       software,
+      install,
     ],
   );
 
@@ -4745,14 +4751,16 @@ function Wizard() {
               <h2 className="h2 pc-stepflow__title">install</h2>
               <p className="body pc-stepflow__intro">
                 That&apos;s the whole setup. Everything a node needs to install
-                itself is in its answer file; the rest — ssh hardening, oidc,
+                itself is in its answer file: baked into the proxmox iso, it
+                installs the node unattended, reachable at its address from
+                step 3. The rest — ssh hardening, oidc,
                 backups{guests.length > 0 ? ", the vms and containers" : ""} — is
                 applied when the cluster is configured, after the install.
               </p>
 
               <div className="pc-stepflow__fields">
                 {blocking.length > 0 && <ProblemList problems={blocking} step={currentStep} />}
-                <AnswerFilesPanel state={snapshot} blocked={blocking.length > 0} />
+                <InstallGuide state={snapshot} blocked={blocking.length > 0} onInstallChange={setInstall} />
               </div>
 
               <div className="pc-stepflow__nav">

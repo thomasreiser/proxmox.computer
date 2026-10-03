@@ -12,7 +12,8 @@ import { defaultBackupPlan } from "./backups";
 import { defaultAccessPlan } from "./access";
 import { defaultSoftwarePlan, newGuest } from "./software";
 import { defaultStoragePlan } from "./derive";
-import { accessPlan, backupPlan, cluster, disks, persistedState, softwarePlan } from "./test-fixtures";
+import { accessPlan, backupPlan, cluster, disks, installPlan, persistedState, softwarePlan } from "./test-fixtures";
+import { defaultInstallPlan } from "./boot-disk";
 import { STEP_VERSIONS, STORAGE_VERSION, isPersistedState, type PersistedState, type SavedStepId } from "./wizard-state";
 
 // a complete save, with something of the visitor's own in every step
@@ -98,6 +99,52 @@ describe("restoreSaved", () => {
     expect(restoreSaved(withStale(complete({ currentStep: "install" }), "access"))?.state.currentStep).toBe("access");
     expect(restoreSaved(withStale(complete({ currentStep: "network" }), "access"))?.state.currentStep).toBe("network");
     expect(restoreSaved(withStale(complete({ currentStep: "access" }), "access"))?.state.currentStep).toBe("access");
+  });
+});
+
+// step 8 started saving its boot disks in a later build than steps 1–7
+describe("a save from before step 8 saved anything", () => {
+  const older = (saved: Partial<PersistedState>) => {
+    const copy = { ...saved };
+    delete copy.install;
+    const { install: _install, ...versions } = STEP_VERSIONS;
+    void _install;
+    return { ...copy, stepVersions: versions };
+  };
+
+  it("keeps steps 1–7, and starts step 8 with no boot disks", () => {
+    const saved = complete({ currentStep: "install" });
+    const restored = restoreSaved(older(saved))!;
+    expect(restored.startedOverFrom).toBe("install");
+    expect(restored.state.software).toEqual(saved.software);
+    expect(restored.state.access).toEqual(saved.access);
+    expect(restored.state.install).toEqual(defaultInstallPlan());
+    expect(restored.state.currentStep).toBe("install");
+    expect(isPersistedState(restored.state)).toBe(true);
+  });
+
+  it("tells the visitor only step 8 starts over", () => {
+    expect(startedOverNotice("install")).toBe(
+      "step 8, install, has changed since this setup was saved — it and the steps after it start over. steps 1–7 are kept.",
+    );
+  });
+});
+
+describe("step 8's boot disks", () => {
+  it("are kept with a current save", () => {
+    const saved = complete({ install: installPlan({ bootDisks: ["nvme0n1", "sda", ""] }) });
+    expect(restoreSaved(saved)?.state.install.bootDisks).toEqual(["nvme0n1", "sda", ""]);
+  });
+
+  it("start over when an earlier step does", () => {
+    const saved = complete({ install: installPlan({ bootDisk: "sda" }) });
+    expect(restoreSaved(withStale(saved, "software"))?.state.install).toEqual(defaultInstallPlan());
+  });
+
+  it("start over when they're not the shape they should be", () => {
+    const restored = restoreSaved({ ...complete(), install: { bootDisk: "sda", bootDisks: "sda" } })!;
+    expect(restored.startedOverFrom).toBe("install");
+    expect(restored.state.install).toEqual(defaultInstallPlan());
   });
 });
 

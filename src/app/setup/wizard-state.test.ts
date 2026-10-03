@@ -55,6 +55,7 @@ function persisted(overrides: Partial<PersistedState> = {}): PersistedState {
     access: accessPlan(),
     software: defaultSoftwarePlan(),
     identicalStorage: false,
+    install: { bootDisk: "", bootDisks: [] },
     ...overrides,
   };
 }

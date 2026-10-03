@@ -30,7 +30,11 @@ npx tsc --noEmit  # typecheck (includes test files)
 npm run lint
 npx vitest run --coverage   # find untested code; new code should not lower coverage
 npm run dev       # don't kill a dev server you didn't start — the user may be running one
+cd tofu && tofu fmt -recursive && tofu init -backend=false && tofu validate && tofu test
+                  # infra changes: same for tofu/bootstrap; tests plan against mocked providers
 ```
+
+**The site is served with a strict CSP** (`tofu/cloudfront.tf`): `connect-src 'self'`, nothing loaded from another origin. A change that adds an external font, script or request is blocked in production even though it works in `npm run dev`; it has to go into the CSP too, or better, not be added.
 
 All three of `npm test`, `npx tsc --noEmit` and `npm run lint` must be clean before work is called done. Report failures as they are; don't stop at "should pass".
 
@@ -63,6 +67,13 @@ src/app/setup/
   form-fields.tsx   fields the steps share (CidrField, CheckedTextField, Select, Check) and
                     RevealErrorsContext — kept out of page.tsx so other modules can use them
   answer-files-panel.tsx  step 8's downloads (async: hashes + sealed setup)
+  boot-disk.ts      step 8's one question: each node's boot disk by its lsblk name (one
+                    while identicalHardware), validateBootDiskName, bootDiskFor(),
+                    answerBootDisk() — what the answer file gets, or null (placeholder)
+  install.ts        step 8's install guide logic: proxmox ve 9.2 iso + sha256, lsblk
+                    clues per node, validate/prepare-iso commands, web ui urls
+  install-guide.tsx step 8's six-part guide: iso → find disk → name it → download →
+                    build iso → boot
   capacity.ts       memory / disk meters per node and pool: proxmox, ceph, zfs overhead
                     (documented defaults, labeled as estimates) + guests; drawn by
                     meter-bar.tsx in --meter-* colors (palette-validated) — full in the
@@ -74,8 +85,8 @@ src/app/setup/
   cpu.ts            cpu family catalog and qemu type resolution; cpuTypeOptions() — the
                     guest cpu types every given host can run (cpu_types in the data), and
                     clusterCpuBaseline(), the default a guest follows
-  answer-file.ts    each node's answer.toml for the unattended installer; never names
-                    a device (boot disk stays CHANGE-ME); root password only as a $6$
+  answer-file.ts    each node's answer.toml for the unattended installer (proxmox ve 9.2);
+                    names only the boot disk typed in step 8, else CHANGE-ME; root password only as a $6$
                     hash; embeds the sealed setup as one comment line, which
                     readAnswerToml() + openAnswerSetup() read back; src/app/open-setup.tsx
                     reopens it after asking for the file's passphrase
@@ -93,6 +104,11 @@ src/app/how-it-works/   explainer page; pipeline.ts is its diagram data
 src/data/               static json (steps, cpu families, nic speeds)
 src/test/setup.ts       jsdom polyfills, next/navigation mock, localStorage reset
 src/test/router.ts      the router spy every component sees — assert router.push(...)
+tofu/                   the hosting: private S3 + CloudFront (https, security headers, csp)
+                        + Cloudflare dns; bootstrap/ makes the state bucket and deploy role.
+                        functions/viewer-request.js maps /route/ → /route/index.html.
+                        see tofu/README.md
+.github/workflows/deploy.yml  test + build on every push/pr; apply, upload, invalidate on main
 ```
 
 **Reserved file names.** Inside `src/app/`, `page`, `layout`, `loading`, `error`, `not-found`, `template`, `route` and `default` (any extension) are Next.js route files. Never name a helper module one of them: a `layout.ts` next to a preview page silently becomes that route's layout. Page files export only their default component plus Next's own named exports (`metadata`, …), so put anything else in its own module.
@@ -104,7 +120,7 @@ src/test/router.ts      the router spy every component sees — assert router.pu
 - **Encryption at rest.** The state holds root passwords and an OIDC secret, so it is never stored in the clear: `savePersistedState` / `loadPersistedState` / `persistCurrentStep` go through `vault.ts` and are async. The key is derived from the visitor's passphrase and lives in memory only (it survives client-side navigation, not a reload). Every page that reads the state sits behind `<VaultGate>`. Answer files carry the same sealed envelope, never a plain state, and root passwords only as `$6$` hashes. Never log, render or embed a secret anywhere but its own field.
 - **Persistence.** `PersistedState` is saved with a debounced (300 ms) autosave and restored by `restoreSaved` on load. **Every step has its own version in `STEP_VERSIONS`: any change to the shape of what a step saves must bump that step's version** and extend its check in `STEP_SECTIONS` (the comment above it says which fields belong to which step — disk roles are step 4's, each node's network step 3's). On load, a save is kept up to its first step with another version (or a failed check); that step and every later one start over from `freshState()`, the visitor is sent back to it and told so. Nothing is migrated or half-applied within a step. `STORAGE_VERSION` covers only the save's layout (which fields belong to which step): bump it when that changes, and a save is discarded wholesale.
 - **Hydration.** `localStorage` is only read after mount (`hydrated` flag). Never read it during render, and never let the autosave run before hydration.
-- **Step hand-off.** No step advances directly. Each step's "preview" button routes to `/setup/preview/<step>`; that page's "next" awaits `persistCurrentStep(next)`, then calls `router.push("/setup")`, and the wizard restores on the new step. New steps follow the same pattern: add the id to `WizardStepId`, `wizard-steps.json`, `isPersistedState` and `STEP_ORDER`. Three exceptions, all through the same `problemsUpTo` gate (`tryNext`): step 1, location, has nothing to draw, so its "next" goes straight to hardware; step 7, software, is optional, so with no guests it shows "skip" to step 8 instead of "preview"; step 8, install, is the end — no preview, just the answer-file downloads, offered once steps 1–7 have no problems. Copy refers to steps by number ("add a disk in step 2"), so inserting a step means renumbering those too.
+- **Step hand-off.** No step advances directly. Each step's "preview" button routes to `/setup/preview/<step>`; that page's "next" awaits `persistCurrentStep(next)`, then calls `router.push("/setup")`, and the wizard restores on the new step. New steps follow the same pattern: add the id to `WizardStepId`, `wizard-steps.json`, `isPersistedState` and `STEP_ORDER`. Three exceptions, all through the same `problemsUpTo` gate (`tryNext`): step 1, location, has nothing to draw, so its "next" goes straight to hardware; step 7, software, is optional, so with no guests it shows "skip" to step 8 instead of "preview"; step 8, install, is the end — no preview: it asks each node's boot disk and offers the answer-file downloads once steps 1–8 have no problems. Copy refers to steps by number ("add a disk in step 2"), so inserting a step means renumbering those too.
 - **Identical-across-nodes modes** (`identicalHardware`, `identicalNetwork`, `identicalStorage`) copy *structure* only. Per-node identity (hostname, host IPs, disk sizes/names) is never overwritten.
 - **Effective vs chosen.** Several choices are stored as the visitor made them and *read* through an effective-value function that clamps them to what the current nodes and disks allow, without discarding the choice. Always read the effective one:
   - `clusterStorage` → `effectiveClusterStorage()`. Ceph and zfs are independent switches, and both at once need 2 spare disks per node. When only one fits, ceph wins.
@@ -115,7 +131,7 @@ src/test/router.ts      the router spy every component sees — assert router.pu
 - **Static IPs carry their network's prefix** (`10.0.10.11/24`: address .11 in the 10.0.10.0/24 network), exactly as Proxmox and `/etc/network/interfaces` write it. Never propose /32: it leaves the node alone on its link, with no route to its gateway or its peers. `hostCidrMeaning()` spells the value out under every static-IP field and flags a /32.
 - **Don't allow invalid input where the valid set is known.** Offer only valid options (e.g. `replicaChoices(nodeCount)`) instead of accepting any value and warning afterwards. Hints are for choices that are valid but unwise.
 - **Effects must not loop.** An effect that calls `setNodes` re-runs whenever its dependencies change, so it needs reference-stable dependencies (memoize arrays on their primitive inputs, not on a freshly built object), and a transform that returns the *same* array when nothing changed (see `withoutPurposes`). Getting either wrong renders forever, which in tests shows up as a suite that hangs rather than fails.
-- **Intent, never device identity.** The wizard records roles, speeds and sizes. It never asks for `enp3s0`, `/dev/sdX` or MACs. Those come from the machines in a later phase (see `/how-it-works`).
+- **Intent, never device identity.** The wizard records roles, speeds and sizes. It never asks for `enp3s0`, `/dev/sdX` or MACs. Those come from the machines in a later phase (see `/how-it-works`). The one exception is step 8's boot disk (`boot-disk.ts`), because the installer needs it first: asked last, after the guide has the visitor read it off `lsblk` on that machine; only whole-disk names accepted; a mismatch with the declared disk type warns; left empty, the file keeps `CHANGE-ME` so the install stops rather than guesses. Don't widen the exception.
 - Validators return `null` when valid, and an empty value is usually "not answered yet" rather than an error. Hints advise and never block.
 
 ## Testing

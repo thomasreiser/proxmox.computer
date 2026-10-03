@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   DISK_PLACEHOLDER,
+  LSBLK_COMMAND,
   STATE_MARKER,
   openAnswerSetup,
   prepareAnswerFiles,
@@ -11,7 +12,7 @@ import {
   tomlDataUrl,
   tomlString,
 } from "./answer-file";
-import { ED25519_KEY, RSA_KEY, accessPlan, bond, network, nics, node, persistedState } from "./test-fixtures";
+import { ED25519_KEY, RSA_KEY, accessPlan, bond, installPlan, network, nics, node, persistedState } from "./test-fixtures";
 import { sha512Crypt } from "./password-hash";
 
 const ctx = {
@@ -92,6 +93,53 @@ describe("buildAnswerToml", () => {
     expect(toml).toContain("the boot disk you declared: nvme, 512 gb");
   });
 
+  it("says how to find the boot disk, and how to write it in", () => {
+    const toml = buildAnswerToml(pve01(), ctx, bare);
+    const diskSetup = toml.slice(toml.indexOf("[disk-setup]"));
+    expect(diskSetup).toContain(`#   ${LSBLK_COMMAND}`);
+    expect(diskSetup).toContain('# then put its NAME here, without /dev/ — e.g. disk-list = ["nvme0n1"]');
+    expect(diskSetup).toContain('#   filter.ID_SERIAL = "*S5GXNF0R123456*"');
+  });
+
+  // the serial filter is an example: live, it would replace the placeholder's safe failure
+  it("leaves the serial filter commented out", () => {
+    const k = keys(buildAnswerToml(pve01(), ctx, bare));
+    expect(Object.keys(k).filter((key) => key.startsWith("filter"))).toEqual([]);
+  });
+
+  it("writes in the boot disk named in step 8", () => {
+    const toml = buildAnswerToml(pve01(), ctx, { ...bare, bootDisk: "nvme0n1" });
+    expect(keys(toml)["disk-list"]).toBe('["nvme0n1"]');
+    expect(toml).toContain("#   1. check nvme0n1 in [disk-setup] is this node's boot disk: the installer wipes it");
+    expect(toml).toContain("# named in step 8, from lsblk on this machine");
+    // nothing left that tells you to replace it, or how to find it
+    expect(toml).not.toContain(DISK_PLACEHOLDER);
+    expect(toml).not.toContain(LSBLK_COMMAND);
+    // the serial alternative is still offered
+    expect(toml).toContain('#   filter.ID_SERIAL = "*S5GXNF0R123456*"');
+  });
+
+  it("keeps the placeholder, and says why, without a boot disk", () => {
+    for (const bootDisk of [undefined, null, ""]) {
+      const toml = buildAnswerToml(pve01(), ctx, { ...bare, bootDisk });
+      expect(keys(toml)["disk-list"]).toBe(`["${DISK_PLACEHOLDER}"]`);
+      expect(toml).toContain(`#   1. replace ${DISK_PLACEHOLDER} in [disk-setup] with this node's boot disk`);
+      expect(toml).toContain("# no boot disk was named in step 8, so this won't match anything until you change it");
+    }
+  });
+
+  it("is written for proxmox ve 9.2, and builds from its iso", () => {
+    const toml = buildAnswerToml(pve01(), ctx, bare);
+    expect(toml.split("\n")[0]).toBe("# answer file for pve01.lab.lan — proxmox ve 9.2 unattended install");
+    expect(toml).toContain("prepare-iso proxmox-ve_9.2-1.iso --fetch-from iso");
+  });
+
+  it("names its own file in the commands at the top", () => {
+    const toml = buildAnswerToml(pve01(), ctx, bare);
+    expect(toml).toContain("#   2. proxmox-auto-install-assistant validate-answer answer-pve01.toml");
+    expect(toml).toContain("--fetch-from iso --answer-file answer-pve01.toml");
+  });
+
   it("writes the root password's hash, never a password", () => {
     const k = keys(buildAnswerToml(pve01(), ctx, { passwordHash: "$6$salt$hash", sshKeys: [] }));
     expect(k["root-password-hashed"]).toBe('"$6$salt$hash"');
@@ -145,6 +193,19 @@ describe("tomlDataUrl", () => {
 });
 
 describe("prepareAnswerFiles", () => {
+  it("writes each node's own boot disk into its file", async () => {
+    const state = persistedState({ install: installPlan({ bootDisks: ["nvme0n1", "", "/dev/sdc"] }) });
+    const disks = (await prepareAnswerFiles(state, ctx)).map((f) => keys(f.toml)["disk-list"]);
+    // pve02 has none yet; pve03's isn't valid — both keep the placeholder
+    expect(disks).toEqual(['["nvme0n1"]', `["${DISK_PLACEHOLDER}"]`, `["${DISK_PLACEHOLDER}"]`]);
+  });
+
+  it("writes the shared boot disk into every file while the hardware is identical", async () => {
+    const state = persistedState({ identicalHardware: true, install: installPlan({ bootDisk: "sda", bootDisks: ["nvme0n1"] }) });
+    const disks = (await prepareAnswerFiles(state, ctx)).map((f) => keys(f.toml)["disk-list"]);
+    expect(disks).toEqual(['["sda"]', '["sda"]', '["sda"]']);
+  });
+
   it("writes one file per node, each with its own password's hash", async () => {
     const state = persistedState();
     const files = await prepareAnswerFiles(state, ctx);

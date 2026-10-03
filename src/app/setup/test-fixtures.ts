@@ -19,6 +19,7 @@ import type {
   NicSpeed,
   NodeInfo,
   NodeNetwork,
+  InstallPlan,
   PersistedState,
 } from "./wizard-state";
 
@@ -164,9 +165,15 @@ export function persistedState(overrides: Partial<PersistedState> = {}): Persist
     backups: backupPlan(),
     access: accessPlan(),
     software: softwarePlan(),
+    install: installPlan(),
     identicalStorage: false,
     ...overrides,
   };
+}
+
+/** step 8's plan: no boot disk named yet, unless stated */
+export function installPlan(overrides: Partial<InstallPlan> = {}): InstallPlan {
+  return { bootDisk: "", bootDisks: [], ...overrides };
 }
 
 /** step 7's plan: these guests, and kubernetes' defaults unless stated */
