@@ -1,0 +1,196 @@
+# Tests and builds every push and pull request; on main it also applies the
+# infrastructure in tofu/, uploads the static export to s3 and clears the
+# CloudFront cache. Setup and the secrets it needs: tofu/README.md.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  NODE_VERSION: "22"
+  TOFU_VERSION: "1.11.0"
+  # the state and site buckets' region; the two must stay the same
+  AWS_REGION: eu-central-1
+  TF_VAR_aws_region: eu-central-1
+
+jobs:
+  app:
+    name: test and build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - run: npm ci
+      - run: npm run lint
+      - run: npx tsc --noEmit
+      - run: npm test
+      - run: npm run build
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: site
+          path: out/
+          if-no-files-found: error
+          retention-days: 7
+
+  infra:
+    name: check infrastructure
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: opentofu/setup-opentofu@v2
+        with:
+          tofu_version: ${{ env.TOFU_VERSION }}
+          tofu_wrapper: false
+
+      - name: format
+        run: tofu fmt -check -recursive
+        working-directory: tofu
+
+      # both stacks plan against mocked providers: no credentials needed
+      - name: site stack
+        working-directory: tofu
+        run: |
+          tofu init -backend=false -input=false
+          tofu validate
+          tofu test
+
+      - name: bootstrap stack
+        working-directory: tofu/bootstrap
+        run: |
+          tofu init -backend=false -input=false
+          tofu validate
+          tofu test
+
+  deploy:
+    name: deploy
+    needs: [app, infra]
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # the deploy role trusts only this environment (tofu/bootstrap)
+    environment:
+      name: production
+      url: https://proxmox.computer/
+    permissions:
+      contents: read
+      id-token: write
+    # never two applies or uploads at once, and never cancel one halfway
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      TF_VAR_cloudflare_zone_id: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+      TF_IN_AUTOMATION: "1"
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: opentofu/setup-opentofu@v2
+        with:
+          tofu_version: ${{ env.TOFU_VERSION }}
+          tofu_wrapper: false
+
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-session-name: proxmox-computer-deploy-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: tofu init
+        working-directory: tofu
+        run: >-
+          tofu init -input=false
+          -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}"
+          -backend-config="region=${AWS_REGION}"
+
+      - name: tofu plan
+        working-directory: tofu
+        run: |
+          tofu plan -input=false -out=tfplan
+          {
+            echo '### tofu plan'
+            echo '```'
+            tofu show -no-color tfplan | tail -n 200
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: tofu apply
+        working-directory: tofu
+        run: tofu apply -input=false tfplan
+
+      - name: read outputs
+        id: infra
+        working-directory: tofu
+        run: |
+          echo "bucket=$(tofu output -raw bucket_name)" >> "$GITHUB_OUTPUT"
+          echo "distribution=$(tofu output -raw distribution_id)" >> "$GITHUB_OUTPUT"
+          echo "url=$(tofu output -raw url)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: site
+          path: out
+
+      # Hashed assets first, so no page that's about to go live references a
+      # chunk that isn't there yet. Their names change with their content, so
+      # they're cached for a year and never deleted: a tab still running the
+      # previous build can keep loading its chunks.
+      - name: upload hashed assets
+        run: >-
+          aws s3 sync out/_next/static "s3://${{ steps.infra.outputs.bucket }}/_next/static"
+          --cache-control "public, max-age=31536000, immutable"
+          --no-progress
+
+      # Everything else keeps its name between builds: browsers revalidate on
+      # every load (max-age=0), CloudFront keeps it until the invalidation
+      # below (s-maxage). --delete removes pages that no longer exist; the
+      # excluded _next/static is left alone.
+      - name: upload pages
+        run: >-
+          aws s3 sync out "s3://${{ steps.infra.outputs.bucket }}"
+          --exclude "_next/static/*"
+          --delete
+          --cache-control "public, max-age=0, s-maxage=31536000, must-revalidate"
+          --no-progress
+
+      - name: clear the cdn cache
+        run: |
+          id=$(aws cloudfront create-invalidation \
+            --distribution-id "${{ steps.infra.outputs.distribution }}" \
+            --paths "/*" \
+            --query Invalidation.Id --output text)
+          echo "invalidation $id"
+          aws cloudfront wait invalidation-completed \
+            --distribution-id "${{ steps.infra.outputs.distribution }}" \
+            --id "$id"
+
+      # retried: on the very first deploy the dns record is minutes old
+      - name: smoke test
+        run: |
+          url="${{ steps.infra.outputs.url }}"
+          curl -fsS --retry 10 --retry-all-errors --retry-delay 15 -o /dev/null -D headers.txt "${url}setup/"
+          grep -qi '^content-security-policy:' headers.txt || { echo "no csp header on ${url}setup/"; cat headers.txt; exit 1; }
+          grep -qi '^strict-transport-security:' headers.txt || { echo "no hsts header on ${url}setup/"; cat headers.txt; exit 1; }
+          code=$(curl -s -o /dev/null -w '%{http_code}' "${url}setup")
+          [ "$code" = "301" ] || { echo "${url}setup returned $code, expected a 301 to setup/"; exit 1; }
+          echo "live at $url"
